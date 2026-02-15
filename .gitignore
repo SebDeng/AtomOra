@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.venv/
+
+# Secrets — NEVER commit API keys
+config/secrets.yaml
+atomora/config/secrets.yaml
+.env
+*.env.*
+*api*.txt
+*Api*.txt
+*API*.txt
+*key*.txt
+*secret*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Data
+data/embeddings/
+data/graph/
+data/history.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# MLX model cache
+models/
+*.gguf
+*.safetensors
+
+# Compiled binaries
+*.bin
+
+# Audio temp
+*.wav
+*.mp3
+*.ogg

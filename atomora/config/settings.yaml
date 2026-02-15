@@ -1,0 +1,43 @@
+# AtomOra Settings
+
+app:
+  name: AtomOra
+  hotkey_load_paper: cmd+shift+a    # Load paper context from frontmost PDF
+  hotkey_talk: cmd+shift+r          # Toggle voice recording
+  max_conversation_history: 20      # Keep last N exchanges
+  preread_prompt: >
+    I just opened this paper. Skim through it and give me 2-3 sentences
+    on the core findings and anything worth noting. Be concise — like
+    a colleague glancing at a paper for the first time.
+
+llm:
+  primary: claude                   # gemini | claude
+  gemini:
+    model: gemini-2.5-pro
+    max_output_tokens: 4096
+    temperature: 0.7
+  claude:
+    model: claude-opus-4-6
+    max_output_tokens: 4096
+    temperature: 0.7
+
+voice:
+  stt:
+    model: Qwen/Qwen3-ASR-0.6B     # via mlx-audio (future)
+    vad_threshold: 0.5
+    silence_duration: 1.5            # seconds of silence to stop recording
+    sample_rate: 16000
+  tts:
+    engine: edge                     # edge | macos_say
+    edge:
+      voice: en-US-AvaMultilingualNeural    # English (also handles multilingual)
+      voice_zh: zh-CN-XiaoxiaoNeural        # Chinese
+      rate: "+0%"                           # Speed: -50% to +100%
+    macos_say:
+      voice: Samantha               # macOS English voice (offline fallback)
+      voice_zh: Tingting            # macOS Chinese voice
+      rate: 200                     # words per minute
+
+pdf:
+  max_pages: 50                     # Skip papers longer than this
+  max_chars: 100000                 # Truncate extracted text

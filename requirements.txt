@@ -1,0 +1,28 @@
+# AtomOra - Personal Research Intelligence System
+# Phase 1: Talking Sidebar MVP
+
+# --- Core ---
+rumps>=0.4.0                # macOS menubar app
+pyobjc-framework-Cocoa      # macOS APIs (NSWorkspace, window detection)
+pyobjc-framework-Quartz     # Screen/window info
+pymupdf>=1.24.0             # PDF text extraction (fitz)
+
+# --- LLM APIs ---
+google-genai>=1.0.0         # Gemini 3 Pro API
+anthropic>=0.40.0           # Claude Opus 4.6 API
+
+# --- Voice ---
+sounddevice>=0.5.0          # Audio recording
+numpy>=1.26.0               # Audio processing
+silero-vad>=5.1             # Voice activity detection
+
+# --- Future: Local ML (uncomment when ready) ---
+# mlx-audio                 # Qwen3-ASR STT + Kokoro/Qwen3-TTS
+# mlx-vlm                   # Qwen3-VL vision
+# sentence-transformers     # GTE embeddings
+
+# --- Config ---
+pyyaml>=6.0                 # YAML config files
+
+# --- Dev ---
+pytest>=8.0
