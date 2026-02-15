@@ -1,10 +1,10 @@
-"""Voice input: audio recording with VAD-based silence detection.
+"""Voice input: ambient listening with silero-vad.
 
-Day 1: Records audio, saves to temp WAV, returns path for STT.
-Future: Qwen3-ASR-0.6B via mlx-audio for streaming transcription.
+Always-on microphone. VAD detects speech start/end automatically.
+When speech ends (silence after speech), returns the recorded audio
+for transcription. Pauses listening during TTS playback to avoid echo.
 """
 
-import io
 import tempfile
 import threading
 import wave
@@ -14,65 +14,141 @@ import sounddevice as sd
 
 
 class Microphone:
-    """Record audio with voice activity detection."""
+    """Ambient microphone with VAD-based speech detection."""
 
     def __init__(self, config: dict):
         self.sample_rate = config.get("sample_rate", 16000)
         self.silence_duration = config.get("silence_duration", 1.5)
-        self.vad_threshold = config.get("vad_threshold", 0.01)  # RMS energy threshold
-        self._recording = False
-        self._audio_buffer: list[np.ndarray] = []
+        self.min_speech_duration = config.get("min_speech_duration", 0.8)
 
-    def record_until_stopped(self) -> str | None:
-        """Record audio until stop() is called (push-to-talk).
+        self._running = False
+        self._paused = False  # Paused during TTS playback
+        self._callback = None  # Called with wav_path when speech ends
+        self._thread: threading.Thread | None = None
 
-        Returns path to the recorded WAV file, or None if no audio captured.
+        # VAD
+        self._vad = None
+        self._init_vad()
+
+    def _init_vad(self):
+        """Initialize silero-vad."""
+        try:
+            from silero_vad import load_silero_vad
+            self._vad = load_silero_vad()
+            print("[Microphone] silero-vad loaded")
+        except Exception as e:
+            print(f"[Microphone] VAD init failed: {e}")
+
+    def start_ambient(self, callback):
+        """Start ambient listening. Calls callback(wav_path) when speech ends.
+
+        Args:
+            callback: Function called with the path to the recorded WAV file
+                     whenever a speech segment is detected and completed.
         """
-        self._recording = True
-        self._audio_buffer = []
-        frames_per_chunk = int(self.sample_rate * 0.1)  # 100ms chunks
+        if self._running:
+            return
 
-        print("[Microphone] Recording... press Talk again to stop")
+        self._callback = callback
+        self._running = True
+        self._paused = False
+        self._thread = threading.Thread(target=self._listen_loop, daemon=True)
+        self._thread.start()
+        print("[Microphone] Ambient listening started")
+
+    def stop(self):
+        """Stop ambient listening entirely."""
+        self._running = False
+        print("[Microphone] Ambient listening stopped")
+
+    def pause(self):
+        """Pause listening (e.g., during TTS playback)."""
+        self._paused = True
+
+    def resume(self):
+        """Resume listening after pause."""
+        self._paused = False
+
+    def _listen_loop(self):
+        """Main listening loop — runs continuously in background."""
+        import torch
+
+        chunk_samples = 512  # silero-vad minimum at 16kHz
+        chunk_ms = chunk_samples * 1000 / self.sample_rate  # 32ms
+        silence_chunks_needed = int(self.silence_duration * 1000 / chunk_ms)
+        min_speech_chunks = int(self.min_speech_duration * 1000 / chunk_ms)
 
         try:
             with sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=1,
                 dtype="float32",
-                blocksize=frames_per_chunk,
+                blocksize=chunk_samples,
             ) as stream:
-                while self._recording:
-                    audio_chunk, _ = stream.read(frames_per_chunk)
-                    self._audio_buffer.append(audio_chunk.copy())
+
+                while self._running:
+                    # Wait while paused (during TTS)
+                    if self._paused:
+                        # Drain the mic buffer to avoid stale audio
+                        stream.read(chunk_samples)
+                        continue
+
+                    # Phase 1: Wait for speech onset
+                    audio_chunk, _ = stream.read(chunk_samples)
+                    chunk_tensor = torch.from_numpy(audio_chunk[:, 0].copy())
+
+                    confidence = self._vad(chunk_tensor, self.sample_rate).item()
+
+                    if confidence < 0.5:
+                        continue  # No speech — keep waiting
+
+                    # Speech detected! Start recording
+                    print("[Microphone] Speech detected")
+                    speech_buffer = [audio_chunk.copy()]
+                    silence_count = 0
+                    speech_count = 1
+
+                    # Phase 2: Record until silence
+                    while self._running and not self._paused:
+                        audio_chunk, _ = stream.read(chunk_samples)
+                        speech_buffer.append(audio_chunk.copy())
+
+                        chunk_tensor = torch.from_numpy(audio_chunk[:, 0].copy())
+                        confidence = self._vad(chunk_tensor, self.sample_rate).item()
+
+                        if confidence >= 0.5:
+                            silence_count = 0
+                            speech_count += 1
+                        else:
+                            silence_count += 1
+
+                        if silence_count >= silence_chunks_needed:
+                            break
+
+                    # Check minimum duration
+                    if speech_count < min_speech_chunks:
+                        print(f"[Microphone] Too short ({speech_count * chunk_ms}ms), skipping")
+                        self._vad.reset_states()
+                        continue
+
+                    duration = len(speech_buffer) * chunk_ms / 1000
+                    print(f"[Microphone] Speech ended, {duration:.1f}s recorded")
+
+                    # Reset VAD state for next utterance
+                    self._vad.reset_states()
+
+                    # Save and deliver
+                    audio_data = np.concatenate(speech_buffer)
+                    wav_path = self._save_wav(audio_data)
+
+                    if self._callback:
+                        self._callback(wav_path)
 
         except Exception as e:
-            print(f"[Microphone] Recording error: {e}")
-            return None
+            print(f"[Microphone] Listening error: {e}")
         finally:
-            self._recording = False
-
-        if not self._audio_buffer:
-            return None
-
-        duration = len(self._audio_buffer) * 0.1
-        print(f"[Microphone] Recorded {duration:.1f}s of audio")
-
-        # Discard too-short recordings (< 1s is likely just button noise)
-        if duration < 1.0:
-            print("[Microphone] Recording too short, discarding")
-            return None
-
-        # Trim the first 0.2s to avoid click/pop noise from mic activation
-        trim_chunks = 2  # 2 * 100ms = 0.2s
-        audio_buffer = self._audio_buffer[trim_chunks:] if len(self._audio_buffer) > trim_chunks else self._audio_buffer
-
-        # Save to temp WAV
-        audio_data = np.concatenate(audio_buffer)
-        return self._save_wav(audio_data)
-
-    def stop(self):
-        """Stop recording."""
-        self._recording = False
+            self._running = False
+            print("[Microphone] Listening loop ended")
 
     def _save_wav(self, audio: np.ndarray) -> str:
         """Save audio array to a temporary WAV file."""

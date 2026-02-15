@@ -25,7 +25,7 @@ voice:
   stt:
     model: Qwen/Qwen3-ASR-0.6B     # via mlx-audio (future)
     vad_threshold: 0.5
-    silence_duration: 1.5            # seconds of silence to stop recording
+    silence_duration: 1.0            # seconds of silence to stop recording
     sample_rate: 16000
   tts:
     engine: edge                     # edge | macos_say

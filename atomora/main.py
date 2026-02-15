@@ -1,11 +1,10 @@
 """AtomOra — Personal Research Intelligence System.
 
-macOS menubar app. Press Cmd+Shift+A to load the frontmost PDF,
-then Cmd+Shift+R to talk. AtomOra talks back.
+macOS menubar app. Load a PDF, then just talk. AtomOra listens
+continuously, responds, and talks back. Ambient, immersive, zero-friction.
 """
 
 import os
-import sys
 import threading
 import yaml
 import rumps
@@ -47,7 +46,7 @@ class AtomOraApp(rumps.App):
 
         # State
         self.paper: dict | None = None
-        self.is_listening = False
+        self._processing = False  # True while STT → LLM → TTS pipeline is active
 
         # Components
         self.mic = Microphone(self.settings.get("voice", {}).get("stt", {}))
@@ -62,7 +61,7 @@ class AtomOraApp(rumps.App):
         self.menu_status = rumps.MenuItem("Status: Idle")
         self.menu_paper = rumps.MenuItem("No paper loaded")
         self.menu_load = rumps.MenuItem("Load Paper (⌘⇧A)", callback=self.on_load_paper)
-        self.menu_talk = rumps.MenuItem("Talk (⌘⇧R)", callback=self.on_talk)
+        self.menu_mute = rumps.MenuItem("🎤 Listening", callback=self.on_toggle_mute)
         primary = self.settings.get('llm', {}).get('primary', 'gemini')
         self.menu_model = rumps.MenuItem(f"Model: {primary}")
         other_model = "Gemini" if primary == "claude" else "Claude"
@@ -72,37 +71,18 @@ class AtomOraApp(rumps.App):
         self.menu = [
             self.menu_status,
             self.menu_paper,
-            None,  # separator
+            None,
             self.menu_load,
-            self.menu_talk,
+            self.menu_mute,
             self.menu_chat,
             None,
             self.menu_model,
             self.menu_switch,
         ]
 
-        # Register global hotkeys
-        self._register_hotkeys()
-
-        # Auto-open chat panel on launch
+        # Auto-open chat panel
         self.chat_panel.show()
         self.chat_panel.append_message("system", "AtomOra ready. Load a paper to begin.")
-
-    def _register_hotkeys(self):
-        """Register global hotkeys using pyobjc."""
-        try:
-            from Cocoa import NSEvent, NSKeyDownMask
-            from Quartz import (
-                CGEventMaskBit,
-                kCGEventKeyDown,
-            )
-
-            # We use a simpler approach: check key combos in a Carbon hotkey
-            # For MVP, menu items + hotkey hints are sufficient.
-            # Full global hotkey registration will be added in iteration.
-            pass
-        except ImportError:
-            pass
 
     # ─── Actions ──────────────────────────────────────────────────────
 
@@ -110,8 +90,24 @@ class AtomOraApp(rumps.App):
         """Toggle the floating chat panel."""
         self.chat_panel.toggle()
 
+    def on_toggle_mute(self, _=None):
+        """Toggle ambient listening on/off."""
+        if self.mic._running:
+            self.mic.stop()
+            self.menu_mute.title = "🔇 Muted"
+            self._set_status("Muted")
+            self.title = "🔬"
+            print("[AtomOra] Microphone muted")
+        else:
+            if self.paper:
+                self._start_listening()
+            else:
+                self._notify("No paper loaded", "Load a paper first.")
+
     def on_load_paper(self, _=None):
         """Detect frontmost PDF and load its text."""
+        # Stop listening while loading
+        self.mic.stop()
         self._set_status("Loading paper...")
 
         pdf_path = get_frontmost_pdf_path()
@@ -139,16 +135,16 @@ class AtomOraApp(rumps.App):
             self.chat_panel.append_message("system", f"📄 Paper loaded: {title} ({pages} pages)")
             self.chat_panel.show()
 
-            # Background: let AI pre-read the paper
-            thread = threading.Thread(target=self._preread_paper, daemon=True)
+            # Pre-read paper, then start ambient listening
+            thread = threading.Thread(target=self._preread_then_listen, daemon=True)
             thread.start()
 
         except Exception as e:
             self._notify("Error loading PDF", str(e)[:100])
             self._set_status("Idle")
 
-    def _preread_paper(self):
-        """Background: ask the LLM to read and understand the paper."""
+    def _preread_then_listen(self):
+        """Pre-read the paper, speak observation, then start ambient listening."""
         print("[AtomOra] 🧠 AI is pre-reading the paper...")
         try:
             prompt = self.settings.get("app", {}).get(
@@ -159,89 +155,82 @@ class AtomOraApp(rumps.App):
             response = self.llm.chat(prompt)
             print(f"[AtomOra] AI pre-read done: {response[:100]}...")
             self.chat_panel.append_message("assistant", response)
-            self._set_status("Ready — press ⌘⇧R to talk")
+
             # Speak the initial observation
+            self._set_status("🗣️ Speaking...")
             self.tts.speak_sync(response)
+
         except Exception as e:
             print(f"[AtomOra] Pre-read error: {e}")
-            self._set_status("Ready — press ⌘⇧R to talk")
 
-    def on_talk(self, _=None):
-        """Toggle voice recording (push-to-talk)."""
-        if self.is_listening:
-            # Second click: stop recording → process
-            print("[AtomOra] ⏹ Stopping recording...")
-            self.mic.stop()
+        # Start ambient listening
+        self._start_listening()
+
+    def _start_listening(self):
+        """Start ambient microphone listening."""
+        self.mic.start_ambient(callback=self._on_speech_detected)
+        self.menu_mute.title = "🎤 Listening"
+        self._set_status("🎤 Listening...")
+        self.title = "🔬🎤"
+        print("[AtomOra] 🎤 Ambient listening active")
+
+    def _on_speech_detected(self, wav_path: str):
+        """Called by Microphone when a speech segment is detected.
+
+        This runs in the microphone's background thread.
+        """
+        if self._processing:
+            print("[AtomOra] Already processing, skipping")
             return
 
-        if not self.paper:
-            self._notify("No paper loaded", "Press ⌘⇧A first to load a paper.")
-            return
+        self._processing = True
 
-        # First click: start recording
-        self.is_listening = True
-        self._set_status("🎤 Recording... click Talk again to stop")
-        self.menu_talk.title = "⏹ Stop (⌘⇧R)"
-        print("[AtomOra] 🎤 Recording started — click Talk again to stop")
-
-        # Record in background thread, process when stopped
-        thread = threading.Thread(target=self._record_and_respond, daemon=True)
-        thread.start()
-
-    def _record_and_respond(self):
-        """Record audio, transcribe, get LLM response, speak."""
-        # Record until user clicks Talk again
-        wav_path = self.mic.record_until_stopped()
-        self.is_listening = False
-        self.menu_talk.title = "Talk (⌘⇧R)"
-
-        if not wav_path:
-            print("[AtomOra] No audio recorded")
-            self._set_status("Ready")
-            return
-
-        print(f"[AtomOra] Audio saved: {wav_path}")
-
-        # Transcribe
-        self._set_status("💭 Transcribing...")
-        transcription = transcribe_wav(wav_path)
-        print(f"[AtomOra] Transcription: {transcription}")
-
-        if not transcription or transcription.startswith("["):
-            self._set_status("Ready")
-            if transcription:
-                self._notify("STT", transcription)
-            return
-
-        # Show user's speech in chat panel
-        self.chat_panel.append_message("user", transcription)
-
-        # Clean up temp file
         try:
-            os.unlink(wav_path)
-        except OSError:
-            pass
+            # Pause mic to avoid hearing ourselves
+            self.mic.pause()
 
-        # Get LLM response
-        self._set_status("🧠 Thinking...")
-        print(f"[AtomOra] Sending to LLM ({self.llm.primary})...")
-        try:
-            response = self.llm.chat(transcription)
-        except Exception as e:
-            response = f"[LLM error: {e}]"
-            self._notify("Error", str(e)[:100])
+            # Transcribe
+            self._set_status("💭 Transcribing...")
+            transcription = transcribe_wav(wav_path)
+            print(f"[AtomOra] Transcription: {transcription}")
 
-        print(f"[AtomOra] LLM response: {response[:100]}...")
+            # Clean up wav
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
 
-        # Show AI response in chat panel
-        self.chat_panel.append_message("assistant", response)
+            if not transcription or transcription.startswith("["):
+                if transcription:
+                    print(f"[AtomOra] STT: {transcription}")
+                self._set_status("🎤 Listening...")
+                return
 
-        # Speak response (blocking — wait for speech to finish)
-        self._set_status("🗣️ Speaking...")
-        print("[AtomOra] Speaking response...")
-        self.tts.speak_sync(response)
+            # Show in chat panel
+            self.chat_panel.append_message("user", transcription)
 
-        self._set_status("Ready — press ⌘⇧R to talk")
+            # Get LLM response
+            self._set_status("🧠 Thinking...")
+            print(f"[AtomOra] Sending to LLM ({self.llm.primary})...")
+            try:
+                response = self.llm.chat(transcription)
+            except Exception as e:
+                response = f"Sorry, I encountered an error: {e}"
+                print(f"[AtomOra] LLM error: {e}")
+
+            print(f"[AtomOra] LLM response: {response[:100]}...")
+            self.chat_panel.append_message("assistant", response)
+
+            # Speak response
+            self._set_status("🗣️ Speaking...")
+            print("[AtomOra] Speaking response...")
+            self.tts.speak_sync(response)
+
+        finally:
+            self._processing = False
+            # Resume listening
+            self.mic.resume()
+            self._set_status("🎤 Listening...")
 
     def on_switch_model(self, _):
         """Toggle between Gemini and Claude."""
