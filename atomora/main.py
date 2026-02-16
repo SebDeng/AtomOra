@@ -5,7 +5,9 @@ continuously, responds, and talks back. Ambient, immersive, zero-friction.
 """
 
 import os
+import re
 import threading
+import time
 import yaml
 import rumps
 
@@ -13,9 +15,10 @@ from atomora.perception.window_monitor import get_frontmost_pdf_path
 from atomora.perception.pdf_extractor import extract_text
 from atomora.perception.microphone import Microphone
 from atomora.conversation.llm_client import LLMClient
-from atomora.voice.tts import TTSEngine
+from atomora.voice.tts import TTSEngine, _strip_for_speech, SENTENCE_BOUNDARY
 from atomora.stt import transcribe_wav
 from atomora.ui.chat_panel import ChatPanel
+
 
 # ─── Config ───────────────────────────────────────────────────────────
 
@@ -46,7 +49,8 @@ class AtomOraApp(rumps.App):
 
         # State
         self.paper: dict | None = None
-        self._processing = False  # True while STT → LLM → TTS pipeline is active
+        self._processing = False
+        self._interrupted = False  # Set by double-space interrupt
 
         # Components
         self.mic = Microphone(self.settings.get("voice", {}).get("stt", {}))
@@ -55,7 +59,7 @@ class AtomOraApp(rumps.App):
             secrets=self.secrets,
         )
         self.tts = TTSEngine(self.settings.get("voice", {}).get("tts", {}))
-        self.chat_panel = ChatPanel()
+        self.chat_panel = ChatPanel(on_interrupt=self._on_interrupt)
 
         # Menu items
         self.menu_status = rumps.MenuItem("Status: Idle")
@@ -84,6 +88,15 @@ class AtomOraApp(rumps.App):
         self.chat_panel.show()
         self.chat_panel.append_message("system", "AtomOra ready. Load a paper to begin.")
 
+    def _on_interrupt(self):
+        """Handle interrupt: stop TTS and resume listening."""
+        if not self.tts.is_speaking:
+            return
+
+        print("[AtomOra] 🛑 Interrupted (⌥Space)")
+        self._interrupted = True
+        self.tts.stop()
+
     # ─── Actions ──────────────────────────────────────────────────────
 
     def on_toggle_chat(self, _=None):
@@ -94,6 +107,8 @@ class AtomOraApp(rumps.App):
         """Toggle ambient listening on/off."""
         if self.mic._running:
             self.mic.stop()
+            if self.tts.is_speaking:
+                self.tts.stop()
             self.menu_mute.title = "🔇 Muted"
             self._set_status("Muted")
             self.title = "🔬"
@@ -106,7 +121,6 @@ class AtomOraApp(rumps.App):
 
     def on_load_paper(self, _=None):
         """Detect frontmost PDF and load its text."""
-        # Stop listening while loading
         self.mic.stop()
         self._set_status("Loading paper...")
 
@@ -135,7 +149,6 @@ class AtomOraApp(rumps.App):
             self.chat_panel.append_message("system", f"📄 Paper loaded: {title} ({pages} pages)")
             self.chat_panel.show()
 
-            # Pre-read paper, then start ambient listening
             thread = threading.Thread(target=self._preread_then_listen, daemon=True)
             thread.start()
 
@@ -144,27 +157,31 @@ class AtomOraApp(rumps.App):
             self._set_status("Idle")
 
     def _preread_then_listen(self):
-        """Pre-read the paper, speak observation, then start ambient listening."""
+        """Pre-read the paper, speak observation, then start listening.
+
+        Can be interrupted via double-space — will skip to listening.
+        """
         print("[AtomOra] 🧠 AI is pre-reading the paper...")
+        self._interrupted = False
+
         try:
             prompt = self.settings.get("app", {}).get(
                 "preread_prompt",
                 "I just opened this paper. Skim through it and give me 2-3 sentences "
                 "on the core findings and anything worth noting. Be concise."
             )
-            response = self.llm.chat(prompt)
-            print(f"[AtomOra] AI pre-read done: {response[:100]}...")
-            self.chat_panel.append_message("assistant", response)
+            self._stream_and_speak(prompt)
 
-            # Speak the initial observation
-            self._set_status("🗣️ Speaking...")
-            self.tts.speak_sync(response)
+            if self._interrupted:
+                print("[AtomOra] Pre-read interrupted, skipping to listening")
 
         except Exception as e:
             print(f"[AtomOra] Pre-read error: {e}")
 
-        # Start ambient listening
+        self._interrupted = False
         self._start_listening()
+
+    # ─── Ambient Listening ────────────────────────────────────────────
 
     def _start_listening(self):
         """Start ambient microphone listening."""
@@ -177,24 +194,35 @@ class AtomOraApp(rumps.App):
     def _on_speech_detected(self, wav_path: str):
         """Called by Microphone when a speech segment is detected.
 
-        This runs in the microphone's background thread.
+        Returns immediately — processing runs in a separate thread so
+        the mic loop stays free.
         """
         if self._processing:
             print("[AtomOra] Already processing, skipping")
             return
 
         self._processing = True
+        thread = threading.Thread(
+            target=self._process_speech, args=(wav_path,), daemon=True
+        )
+        thread.start()
+
+    def _process_speech(self, wav_path: str):
+        """Process speech: STT → LLM streaming → TTS.
+
+        Mic is paused during the entire pipeline to prevent echo.
+        Can be interrupted via double-space.
+        """
+        self._interrupted = False
 
         try:
-            # Pause mic to avoid hearing ourselves
             self.mic.pause()
 
-            # Transcribe
+            # ── STT ──
             self._set_status("💭 Transcribing...")
             transcription = transcribe_wav(wav_path)
             print(f"[AtomOra] Transcription: {transcription}")
 
-            # Clean up wav
             try:
                 os.unlink(wav_path)
             except OSError:
@@ -203,34 +231,90 @@ class AtomOraApp(rumps.App):
             if not transcription or transcription.startswith("["):
                 if transcription:
                     print(f"[AtomOra] STT: {transcription}")
-                self._set_status("🎤 Listening...")
                 return
 
-            # Show in chat panel
             self.chat_panel.append_message("user", transcription)
 
-            # Get LLM response
+            # ── LLM streaming → TTS ──
             self._set_status("🧠 Thinking...")
-            print(f"[AtomOra] Sending to LLM ({self.llm.primary})...")
-            try:
-                response = self.llm.chat(transcription)
-            except Exception as e:
-                response = f"Sorry, I encountered an error: {e}"
-                print(f"[AtomOra] LLM error: {e}")
+            print(f"[AtomOra] Streaming LLM ({self.llm.primary})...")
+            self._stream_and_speak(transcription)
 
-            print(f"[AtomOra] LLM response: {response[:100]}...")
-            self.chat_panel.append_message("assistant", response)
+            if self._interrupted:
+                print("[AtomOra] Response interrupted")
 
-            # Speak response
-            self._set_status("🗣️ Speaking...")
-            print("[AtomOra] Speaking response...")
-            self.tts.speak_sync(response)
+        except Exception as e:
+            print(f"[AtomOra] Processing error: {e}")
 
         finally:
             self._processing = False
-            # Resume listening
+            self._interrupted = False
             self.mic.resume()
             self._set_status("🎤 Listening...")
+
+    # ─── Streaming Pipeline ───────────────────────────────────────────
+
+    def _stream_and_speak(self, user_message: str) -> str:
+        """Stream LLM → sentence accumulator → TTS.
+
+        Streams text to the chat panel in real-time.
+        Stops early if interrupted (tts._speaking becomes False).
+        Returns full response text accumulated so far.
+        """
+        full_text = ""
+        sentence_buf = ""
+
+        # Create assistant message placeholder for live updates
+        self.chat_panel.append_message("assistant", "...")
+
+        def sentence_stream():
+            """Yield clean sentences as they're completed by the LLM stream."""
+            nonlocal full_text, sentence_buf
+
+            try:
+                for chunk in self.llm.chat_stream(user_message):
+                    # Stop consuming LLM tokens on interrupt
+                    if self._interrupted or not self.tts._speaking:
+                        break
+
+                    full_text += chunk
+                    sentence_buf += chunk
+
+                    # Live-update chat panel
+                    self.chat_panel.update_last_message(full_text)
+
+                    # Extract complete sentences from buffer
+                    parts = SENTENCE_BOUNDARY.split(sentence_buf)
+                    if len(parts) > 1:
+                        for part in parts[:-1]:
+                            sentence = _strip_for_speech(part.strip())
+                            if sentence:
+                                yield sentence
+                        sentence_buf = parts[-1]
+
+            except Exception as e:
+                print(f"[AtomOra] LLM stream error: {e}")
+
+            # Flush remaining buffer (skip if interrupted)
+            if sentence_buf.strip() and not self._interrupted:
+                sentence = _strip_for_speech(sentence_buf.strip())
+                if sentence:
+                    yield sentence
+                sentence_buf = ""
+
+        self._set_status("🗣️ Speaking...")
+        self.tts.speak_streamed_sync(sentence_stream())
+
+        # Final update with whatever text we accumulated
+        if full_text:
+            if self._interrupted:
+                self.chat_panel.update_last_message(full_text + "\n\n⏸ [interrupted]")
+            else:
+                self.chat_panel.update_last_message(full_text)
+
+        return full_text
+
+    # ─── Model Switching ──────────────────────────────────────────────
 
     def on_switch_model(self, _):
         """Toggle between Gemini and Claude."""

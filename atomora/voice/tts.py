@@ -25,6 +25,8 @@ class TTSEngine:
         self._speaking = False
         self._process: subprocess.Popen | None = None
 
+    # ─── Public API ───────────────────────────────────────────────────
+
     def speak(self, text: str):
         """Speak text asynchronously (non-blocking)."""
         if self._speaking:
@@ -33,20 +35,62 @@ class TTSEngine:
         thread.start()
 
     def speak_sync(self, text: str):
-        """Speak text synchronously (blocking)."""
+        """Speak full text synchronously (blocking). Splits into sentences."""
         if self._speaking:
             self.stop()
         self._speak_sync(text)
 
+    def speak_streamed_sync(self, sentence_iter):
+        """Speak sentences from a streaming source (blocking).
+
+        sentence_iter: iterator yielding clean, ready-to-speak text segments.
+        Sentences are played as they arrive — first sentence starts immediately.
+        """
+        if self._speaking:
+            self.stop()
+        self._speaking = True
+        try:
+            if self.engine == "edge":
+                self._speak_edge_sentences(sentence_iter)
+            else:
+                text = " ".join(sentence_iter)
+                if text:
+                    self._speak_macos(text)
+        except Exception as e:
+            print(f"[TTS] Error: {e}")
+        finally:
+            self._speaking = False
+
+    def stop(self):
+        """Stop current speech immediately."""
+        self._speaking = False
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception:
+            pass
+        if self._process:
+            self._process.terminate()
+            self._process = None
+
+    @property
+    def is_speaking(self) -> bool:
+        return self._speaking
+
+    # ─── Internal ─────────────────────────────────────────────────────
+
     def _speak_sync(self, text: str):
-        """Speak text synchronously."""
+        """Speak full text synchronously (batch mode)."""
         self._speaking = True
         try:
             text = _strip_for_speech(text)
             if not text:
                 return
             if self.engine == "edge":
-                self._speak_edge(text)
+                sentences = _split_sentences(text)
+                if sentences:
+                    print(f"[TTS] Edge batch: {len(sentences)} segment(s)")
+                    self._speak_edge_sentences(iter(sentences))
             else:
                 self._speak_macos(text)
         except Exception as e:
@@ -54,12 +98,11 @@ class TTSEngine:
         finally:
             self._speaking = False
 
-    def _speak_edge(self, text: str):
-        """Speak using Edge TTS with sentence-level streaming.
+    def _speak_edge_sentences(self, sentence_iter):
+        """Core Edge TTS producer-consumer pipeline.
 
-        Splits text into sentences, generates audio for each in a background
-        thread, and plays them back-to-back. The first sentence starts playing
-        as soon as it's ready while subsequent sentences are pre-generated.
+        Works with both batch (pre-split sentences) and streaming
+        (sentences arriving from LLM stream) inputs.
         """
         import sounddevice as sd
         import soundfile as sf
@@ -69,16 +112,6 @@ class TTSEngine:
         zh_voice = edge_config.get("voice_zh", "zh-CN-XiaoxiaoNeural")
         rate = edge_config.get("rate", "+0%")
 
-        is_zh = _is_predominantly_chinese(text)
-        voice = zh_voice if is_zh else en_voice
-
-        sentences = _split_sentences(text)
-        if not sentences:
-            return
-
-        print(f"[TTS] Edge: voice={voice}, {len(sentences)} segment(s)")
-
-        # Pre-generation queue: (audio_data, sample_rate, segment_index) or None sentinel
         audio_q: queue_mod.Queue = queue_mod.Queue(maxsize=2)
         t_start = time.perf_counter()
 
@@ -86,32 +119,47 @@ class TTSEngine:
             return time.perf_counter() - t_start
 
         def producer():
-            """Generate audio for each sentence in background."""
+            voice = None
             loop = asyncio.new_event_loop()
-            for i, sentence in enumerate(sentences):
-                if not self._speaking:
-                    break
-                t_gen_start = _ts()
-                tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-                tmp_path = tmp.name
-                tmp.close()
-                try:
-                    loop.run_until_complete(
-                        self._edge_generate(sentence, voice, rate, tmp_path)
-                    )
-                    data, sr = sf.read(tmp_path)
-                    duration = len(data) / sr
-                    print(f"[TTS] seg[{i}] generated: {_ts():.2f}s (took {_ts()-t_gen_start:.2f}s, audio {duration:.1f}s, {len(sentence)} chars)")
-                    audio_q.put((data, sr, i))
-                except Exception as e:
-                    print(f"[TTS] seg[{i}] error: {e}")
-                finally:
+            seg_idx = 0
+            try:
+                for sentence in sentence_iter:
+                    if not self._speaking:
+                        break
+                    sentence = sentence.strip()
+                    if not sentence:
+                        continue
+
+                    # Detect voice on first sentence
+                    if voice is None:
+                        voice = zh_voice if _is_predominantly_chinese(sentence) else en_voice
+                        print(f"[TTS] Edge: voice={voice}")
+
+                    t_gen_start = _ts()
+                    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+                    tmp_path = tmp.name
+                    tmp.close()
                     try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-            loop.close()
-            audio_q.put(None)
+                        loop.run_until_complete(
+                            self._edge_generate(sentence, voice, rate, tmp_path)
+                        )
+                        if not self._speaking:
+                            break
+                        data, sr = sf.read(tmp_path)
+                        duration = len(data) / sr
+                        print(f"[TTS] seg[{seg_idx}] generated: {_ts():.2f}s (took {_ts()-t_gen_start:.2f}s, audio {duration:.1f}s, {len(sentence)} chars)")
+                        audio_q.put((data, sr, seg_idx))
+                        seg_idx += 1
+                    except Exception as e:
+                        print(f"[TTS] seg[{seg_idx}] error: {e}")
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+            finally:
+                loop.close()
+                audio_q.put(None)
 
         gen_thread = threading.Thread(target=producer, daemon=True)
         gen_thread.start()
@@ -119,7 +167,7 @@ class TTSEngine:
         # Play segments as they arrive
         while self._speaking:
             try:
-                item = audio_q.get(timeout=15)
+                item = audio_q.get(timeout=30)
             except queue_mod.Empty:
                 print("[TTS] Timed out waiting for audio")
                 break
@@ -130,6 +178,15 @@ class TTSEngine:
             print(f"[TTS] seg[{idx}] playing:   {_ts():.2f}s (audio {duration:.1f}s)")
             sd.play(data, samplerate=sr)
             sd.wait()
+
+        # Drain queue so producer thread can finish
+        # (producer might be blocked on audio_q.put)
+        while gen_thread.is_alive():
+            try:
+                audio_q.get(timeout=0.5)
+            except queue_mod.Empty:
+                continue
+        gen_thread.join(timeout=1)
 
         print(f"[TTS] total: {_ts():.2f}s")
 
@@ -154,32 +211,15 @@ class TTSEngine:
         self._process.wait()
         self._process = None
 
-    def stop(self):
-        """Stop current speech."""
-        self._speaking = False
-        try:
-            import sounddevice as sd
-            sd.stop()
-        except Exception:
-            pass
-        if self._process:
-            self._process.terminate()
-            self._process = None
-
-    @property
-    def is_speaking(self) -> bool:
-        return self._speaking
-
 
 # ── Text preprocessing ──────────────────────────────────────────────
 
-def _split_sentences(text: str) -> list[str]:
-    """Split text into sentences for streaming TTS.
+# Sentence boundary: English punctuation + whitespace, or Chinese punctuation
+SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+|(?<=[。！？；])')
 
-    Aims for chunks that are long enough for natural speech flow
-    but short enough that the first chunk arrives quickly.
-    """
-    # Split after sentence-ending punctuation followed by whitespace
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences for streaming TTS."""
     raw = re.split(r'(?<=[.!?。！？；])\s+', text)
 
     # Further split long segments on em-dash or semicolon
@@ -196,7 +236,6 @@ def _split_sentences(text: str) -> list[str]:
         part = part.strip()
         if not part:
             continue
-        # Merge very short fragments with previous for natural flow
         if merged and len(merged[-1]) < 60:
             merged[-1] += " " + part
         else:

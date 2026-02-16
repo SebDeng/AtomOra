@@ -4,9 +4,10 @@
 
 ## What It Does
 
-1. **Load a paper** — AtomOra detects the frontmost PDF (Preview/Acrobat), extracts the text, and gives you an initial observation out loud.
+1. **Load a paper** — AtomOra detects the frontmost PDF (Preview/Acrobat), extracts the text, and speaks an initial observation.
 2. **Ambient listening** — Always-on microphone with VAD (voice activity detection). Just start talking — no buttons, no triggers.
-3. **Voice conversation** — Your speech is transcribed, sent to an LLM with the paper context, and the response is spoken back. A floating chat panel shows the text alongside.
+3. **Streaming conversation** — Your speech is transcribed, streamed to an LLM with the paper context, and spoken back sentence-by-sentence. A floating chat panel shows text in real-time.
+4. **Interrupt anytime** — Press **⌥Space** (Option+Space) to stop the AI mid-sentence and take the floor.
 
 AtomOra is not an assistant. It's a research colleague — it has opinions, asks probing questions, and tells you what you need to hear.
 
@@ -27,7 +28,7 @@ AtomOra is not an assistant. It's a research colleague — it has opinions, asks
 │  └── stt.py             — whisper.cpp transcription   │
 │                                                      │
 │  Conversation                                        │
-│  ├── llm_client.py      — Gemini / Claude APIs       │
+│  ├── llm_client.py      — Gemini / Claude streaming   │
 │  └── prompts.py         — Colleague persona          │
 │                                                      │
 │  Voice                                               │
@@ -35,7 +36,8 @@ AtomOra is not an assistant. It's a research colleague — it has opinions, asks
 │                                                      │
 │  UI                                                  │
 │  ├── chat_panel.py      — Python ↔ Swift bridge      │
-│  └── AtomOraPanel.swift — Native floating panel      │
+│  └── AtomOraPanel.swift — Native floating panel +    │
+│                           global hotkey (Carbon)     │
 │                                                      │
 └──────────────────────────────────────────────────────┘
 ```
@@ -44,10 +46,31 @@ AtomOra is not an assistant. It's a research colleague — it has opinions, asks
 
 ```
 Mic (always on) → VAD speech detect → Record until silence
-→ whisper.cpp STT → LLM (Claude/Gemini) → Streaming Edge TTS → Speaker
+  → whisper.cpp STT
+    → LLM streaming (Claude/Gemini tokens)
+      → Sentence accumulator
+        → Edge TTS (producer-consumer, queue=2)
+          → Speaker
 ```
 
-The TTS uses sentence-level streaming to minimize latency — first word out in **~0.5s**, with segments pre-generated during playback. See [docs/tts-streaming.md](docs/tts-streaming.md) for architecture details and benchmarks.
+The entire pipeline is streaming end-to-end:
+- **LLM tokens** arrive and accumulate into sentences
+- **TTS generates audio** per-sentence in a background thread while the current sentence plays
+- **Chat panel** updates in real-time as tokens arrive
+- First word out in **~0.5s** after TTS starts, with zero inter-sentence gaps
+
+See [docs/tts-streaming.md](docs/tts-streaming.md) for architecture details and benchmarks.
+
+### Interrupt (⌥Space)
+
+Press **Option+Space** anywhere to interrupt the AI mid-speech:
+- TTS stops immediately
+- LLM stops generating tokens
+- Producer thread cleans up (drains queue, joins)
+- Chat panel shows accumulated text with `[interrupted]` marker
+- Microphone resumes listening
+
+The hotkey uses Carbon `RegisterEventHotKey` — works system-wide without Accessibility permission.
 
 ## Setup
 
@@ -70,6 +93,14 @@ Download the whisper model:
 mkdir -p ~/.cache/whisper
 curl -L -o ~/.cache/whisper/ggml-base.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+```
+
+### Compile the Chat Panel (if needed)
+
+The Swift panel binary is pre-compiled, but if you need to rebuild:
+```bash
+swiftc -o atomora/ui/AtomOraPanel.bin atomora/ui/AtomOraPanel.swift \
+  -framework SwiftUI -framework AppKit -framework Carbon
 ```
 
 ### API Keys
@@ -106,10 +137,11 @@ All settings in [`atomora/config/settings.yaml`](atomora/config/settings.yaml):
 | `voice.stt.min_speech_duration` | `0.8` | Minimum speech to process (skip noise) |
 | `pdf.max_pages` | `50` | Skip PDFs longer than this |
 
-## Menubar Controls
+## Controls
 
-| Menu Item | Action |
-|-----------|--------|
+| Control | Action |
+|---------|--------|
+| **⌥Space** | Interrupt AI speech (global, works from any app) |
 | 🎤 Listening / 🔇 Muted | Toggle ambient microphone |
 | Load Paper (⌘⇧A) | Detect and load frontmost PDF |
 | Show Chat | Toggle floating conversation panel |
@@ -121,12 +153,14 @@ All settings in [`atomora/config/settings.yaml`](atomora/config/settings.yaml):
 |-----------|------------|
 | Menubar app | [rumps](https://github.com/jaredks/rumps) |
 | PDF extraction | [pymupdf](https://pymupdf.readthedocs.io/) |
-| Window detection | PyObjC (NSWorkspace, Quartz) |
+| Window detection | PyObjC (NSWorkspace) |
 | VAD | [silero-vad](https://github.com/snakers4/silero-vad) |
 | STT | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) |
-| LLM | Claude Opus 4.6 / Gemini 2.5 Pro |
-| TTS | [Edge TTS](https://github.com/rany2/edge-tts) (streaming) |
+| LLM | Claude Opus 4.6 / Gemini 2.5 Pro (streaming) |
+| TTS | [Edge TTS](https://github.com/rany2/edge-tts) (sentence-level streaming) |
 | Chat panel | SwiftUI (NSPanel, dark ultra-thin material) |
+| Global hotkey | Carbon RegisterEventHotKey |
+| Audio I/O | [sounddevice](https://python-sounddevice.readthedocs.io/) |
 
 ## Docs
 

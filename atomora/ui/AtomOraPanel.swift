@@ -1,16 +1,41 @@
 // AtomOra Floating Chat Panel
 // Native SwiftUI panel with dark frosted-glass effect.
 // Communicates with Python backend via stdin (JSON lines).
+// Sends events (e.g. hotkey interrupt) back via stdout.
 
 import SwiftUI
 import AppKit
+import Carbon
+
+// MARK: - Carbon Hotkey Handler
+
+/// Global C-compatible function for Carbon event handler.
+/// Writes interrupt event to stdout when the hotkey is pressed.
+func carbonHotKeyHandler(
+    nextHandler: EventHandlerCallRef?,
+    event: EventRef?,
+    userData: UnsafeMutableRawPointer?
+) -> OSStatus {
+    let msg = "{\"event\":\"interrupt\"}\n"
+    if let data = msg.data(using: .utf8) {
+        FileHandle.standardOutput.write(data)
+    }
+    fputs("[SwiftPanel] Hotkey ⌥Space triggered\n", stderr)
+    return noErr
+}
 
 // MARK: - Models
 
-struct ChatMessage: Identifiable, Equatable {
-    let id = UUID()
+struct ChatMessage: Identifiable {
+    let id: UUID
     let role: String
-    let text: String
+    var text: String
+
+    init(role: String, text: String) {
+        self.id = UUID()
+        self.role = role
+        self.text = text
+    }
 }
 
 struct ChatAction: Codable {
@@ -27,6 +52,13 @@ class ChatState: ObservableObject {
     func append(role: String, text: String) {
         DispatchQueue.main.async {
             self.messages.append(ChatMessage(role: role, text: text))
+        }
+    }
+
+    func updateLast(text: String) {
+        DispatchQueue.main.async {
+            guard !self.messages.isEmpty else { return }
+            self.messages[self.messages.count - 1].text = text
         }
     }
 
@@ -142,6 +174,13 @@ struct ChatContentView: View {
                         }
                     }
                 }
+                .onChange(of: state.messages.last?.text) {
+                    if let last = state.messages.last {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
             }
         }
         .frame(minWidth: 320, idealWidth: 440, minHeight: 300, idealHeight: 580)
@@ -155,10 +194,49 @@ struct ChatContentView: View {
 class PanelDelegate: NSObject, NSApplicationDelegate {
     var panel: NSPanel!
     let chatState = ChatState()
+    var hotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupPanel()
         startStdinReader()
+        registerGlobalHotkey()
+    }
+
+    /// Register ⌥Space as a global hotkey using Carbon API.
+    /// Carbon RegisterEventHotKey works WITHOUT Accessibility permission.
+    private func registerGlobalHotkey() {
+        // Install event handler for hotkey events
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            carbonHotKeyHandler,
+            1,
+            &eventType,
+            nil,
+            nil
+        )
+
+        // Register Option+Space (keycode 49 = Space, optionKey modifier)
+        var hotKeyID = EventHotKeyID(signature: OSType(0x41544D52), id: 1)
+
+        let status = RegisterEventHotKey(
+            UInt32(kVK_Space),
+            UInt32(optionKey),
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+
+        if status == noErr {
+            fputs("[SwiftPanel] Global hotkey registered: ⌥Space (Option+Space) to interrupt\n", stderr)
+        } else {
+            fputs("[SwiftPanel] Failed to register hotkey (status: \(status))\n", stderr)
+        }
     }
 
     private func setupPanel() {
@@ -224,6 +302,10 @@ class PanelDelegate: NSObject, NSApplicationDelegate {
                 case "append":
                     if let role = action.role, let text = action.text {
                         self?.chatState.append(role: role, text: text)
+                    }
+                case "update_last":
+                    if let text = action.text {
+                        self?.chatState.updateLast(text: text)
                     }
                 case "clear":
                     self?.chatState.clear()

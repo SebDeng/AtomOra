@@ -7,6 +7,7 @@ for transcription. Pauses listening during TTS playback to avoid echo.
 
 import tempfile
 import threading
+import time
 import wave
 
 import numpy as np
@@ -70,7 +71,10 @@ class Microphone:
         self._paused = False
 
     def _listen_loop(self):
-        """Main listening loop — runs continuously in background."""
+        """Main listening loop — runs continuously in background.
+
+        Retries on audio device errors (e.g., after TTS releases the device).
+        """
         import torch
 
         chunk_samples = 512  # silero-vad minimum at 16kHz
@@ -78,77 +82,112 @@ class Microphone:
         silence_chunks_needed = int(self.silence_duration * 1000 / chunk_ms)
         min_speech_chunks = int(self.min_speech_duration * 1000 / chunk_ms)
 
-        try:
-            with sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="float32",
-                blocksize=chunk_samples,
-            ) as stream:
+        max_retries = 5
+        for attempt in range(max_retries):
+            if not self._running:
+                break
 
-                while self._running:
-                    # Wait while paused (during TTS)
-                    if self._paused:
-                        # Drain the mic buffer to avoid stale audio
-                        stream.read(chunk_samples)
-                        continue
+            try:
+                # Brief delay to let audio system settle (especially after TTS)
+                if attempt > 0:
+                    wait = min(1.0 * attempt, 3.0)
+                    print(f"[Microphone] Retrying in {wait:.0f}s (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(wait)
+                else:
+                    time.sleep(0.3)
 
-                    # Phase 1: Wait for speech onset
-                    audio_chunk, _ = stream.read(chunk_samples)
-                    chunk_tensor = torch.from_numpy(audio_chunk[:, 0].copy())
+                with sd.InputStream(
+                    samplerate=self.sample_rate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=chunk_samples,
+                ) as stream:
 
-                    confidence = self._vad(chunk_tensor, self.sample_rate).item()
+                    print(f"[Microphone] Audio stream opened")
+                    self._vad.reset_states()
+                    diag_count = 0
+                    peak_level = 0.0
 
-                    if confidence < 0.5:
-                        continue  # No speech — keep waiting
+                    while self._running:
+                        # Wait while paused (during TTS playback)
+                        if self._paused:
+                            time.sleep(0.1)  # Don't read — avoids audio contention with TTS
+                            continue
 
-                    # Speech detected! Start recording
-                    print("[Microphone] Speech detected")
-                    speech_buffer = [audio_chunk.copy()]
-                    silence_count = 0
-                    speech_count = 1
+                        # Phase 1: Wait for speech onset
+                        audio_chunk, overflowed = stream.read(chunk_samples)
+                        if overflowed:
+                            # Stale audio (e.g., buffer filled during pause) — skip
+                            self._vad.reset_states()
+                            continue
 
-                    # Phase 2: Record until silence
-                    while self._running and not self._paused:
-                        audio_chunk, _ = stream.read(chunk_samples)
-                        speech_buffer.append(audio_chunk.copy())
+                        # Periodic audio level diagnostics
+                        level = float(np.abs(audio_chunk).max())
+                        peak_level = max(peak_level, level)
+                        diag_count += 1
+                        if diag_count % 100 == 0:  # ~3.2s
+                            print(f"[Microphone] peak={peak_level:.4f} (listening...)")
+                            peak_level = 0.0
 
                         chunk_tensor = torch.from_numpy(audio_chunk[:, 0].copy())
+
                         confidence = self._vad(chunk_tensor, self.sample_rate).item()
 
-                        if confidence >= 0.5:
-                            silence_count = 0
-                            speech_count += 1
-                        else:
-                            silence_count += 1
+                        if confidence < 0.5:
+                            continue  # No speech — keep waiting
 
-                        if silence_count >= silence_chunks_needed:
-                            break
+                        # Speech detected! Start recording
+                        print(f"[Microphone] Speech detected (confidence={confidence:.2f})")
+                        speech_buffer = [audio_chunk.copy()]
+                        silence_count = 0
+                        speech_count = 1
 
-                    # Check minimum duration
-                    if speech_count < min_speech_chunks:
-                        print(f"[Microphone] Too short ({speech_count * chunk_ms}ms), skipping")
+                        # Phase 2: Record until silence
+                        while self._running and not self._paused:
+                            audio_chunk, _ = stream.read(chunk_samples)
+                            speech_buffer.append(audio_chunk.copy())
+
+                            chunk_tensor = torch.from_numpy(audio_chunk[:, 0].copy())
+                            confidence = self._vad(chunk_tensor, self.sample_rate).item()
+
+                            if confidence >= 0.5:
+                                silence_count = 0
+                                speech_count += 1
+                            else:
+                                silence_count += 1
+
+                            if silence_count >= silence_chunks_needed:
+                                break
+
+                        # Check minimum duration
+                        if speech_count < min_speech_chunks:
+                            print(f"[Microphone] Too short ({speech_count * chunk_ms:.0f}ms), skipping")
+                            self._vad.reset_states()
+                            continue
+
+                        duration = len(speech_buffer) * chunk_ms / 1000
+                        print(f"[Microphone] Speech ended, {duration:.1f}s recorded")
+
+                        # Reset VAD state for next utterance
                         self._vad.reset_states()
-                        continue
 
-                    duration = len(speech_buffer) * chunk_ms / 1000
-                    print(f"[Microphone] Speech ended, {duration:.1f}s recorded")
+                        # Save and deliver
+                        audio_data = np.concatenate(speech_buffer)
+                        wav_path = self._save_wav(audio_data)
 
-                    # Reset VAD state for next utterance
-                    self._vad.reset_states()
+                        if self._callback:
+                            self._callback(wav_path)
 
-                    # Save and deliver
-                    audio_data = np.concatenate(speech_buffer)
-                    wav_path = self._save_wav(audio_data)
+                # Clean exit from while loop
+                break
 
-                    if self._callback:
-                        self._callback(wav_path)
+            except Exception as e:
+                print(f"[Microphone] Audio stream error: {e}")
+                if attempt >= max_retries - 1:
+                    print("[Microphone] Max retries reached, giving up")
 
-        except Exception as e:
-            print(f"[Microphone] Listening error: {e}")
-        finally:
-            self._running = False
-            print("[Microphone] Listening loop ended")
+        self._running = False
+        print("[Microphone] Listening loop ended")
 
     def _save_wav(self, audio: np.ndarray) -> str:
         """Save audio array to a temporary WAV file."""
