@@ -18,10 +18,15 @@ PANEL_BIN = os.path.join(os.path.dirname(__file__), "AtomOraPanel.bin")
 class ChatPanel:
     """Bridge to the native Swift chat panel process."""
 
-    def __init__(self, on_interrupt: Callable | None = None):
+    def __init__(
+        self,
+        on_interrupt: Callable | None = None,
+        on_screenshot: Callable | None = None,
+    ):
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._on_interrupt = on_interrupt
+        self._on_screenshot = on_screenshot
 
     def _ensure_running(self):
         """Launch the Swift panel if not already running."""
@@ -61,6 +66,10 @@ class ChatPanel:
                     print("[ChatPanel] ⌥Space interrupt from Swift panel")
                     if self._on_interrupt:
                         self._on_interrupt()
+                elif event.get("event") == "screenshot":
+                    print("[ChatPanel] ⌥S screenshot from Swift panel")
+                    if self._on_screenshot:
+                        self._on_screenshot()
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
 

@@ -69,6 +69,25 @@ def _get_preview_pdf_path() -> str | None:
     return _run_applescript(script)
 
 
+def get_frontmost_window_id() -> int | None:
+    """Return the CGWindowNumber of the frontmost application's main window.
+
+    This ID can be used with `screencapture -l <id>` or CGWindowListCreateImage.
+    """
+    app = get_frontmost_app()
+    pid = app["pid"]
+
+    windows = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly, kCGNullWindowID
+    )
+    for w in windows:
+        if w.get("kCGWindowOwnerPID") == pid:
+            wid = w.get("kCGWindowNumber")
+            if wid:
+                return int(wid)
+    return None
+
+
 def _get_pdf_from_window_title(pid: int) -> str | None:
     """Fallback: try to extract a file path from the window title."""
     windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)

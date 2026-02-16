@@ -16,11 +16,33 @@ func carbonHotKeyHandler(
     event: EventRef?,
     userData: UnsafeMutableRawPointer?
 ) -> OSStatus {
-    let msg = "{\"event\":\"interrupt\"}\n"
+    // Determine which hotkey was pressed
+    var hotKeyID = EventHotKeyID()
+    GetEventParameter(
+        event!,
+        EventParamName(kEventParamDirectObject),
+        EventParamType(typeEventHotKeyID),
+        nil,
+        MemoryLayout<EventHotKeyID>.size,
+        nil,
+        &hotKeyID
+    )
+
+    let msg: String
+    switch hotKeyID.id {
+    case 1:
+        msg = "{\"event\":\"interrupt\"}\n"
+        fputs("[SwiftPanel] Hotkey ⌥Space triggered\n", stderr)
+    case 2:
+        msg = "{\"event\":\"screenshot\"}\n"
+        fputs("[SwiftPanel] Hotkey ⌥S triggered\n", stderr)
+    default:
+        return noErr
+    }
+
     if let data = msg.data(using: .utf8) {
         FileHandle.standardOutput.write(data)
     }
-    fputs("[SwiftPanel] Hotkey ⌥Space triggered\n", stderr)
     return noErr
 }
 
@@ -195,6 +217,7 @@ class PanelDelegate: NSObject, NSApplicationDelegate {
     var panel: NSPanel!
     let chatState = ChatState()
     var hotKeyRef: EventHotKeyRef?
+    var screenshotHotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupPanel()
@@ -221,7 +244,7 @@ class PanelDelegate: NSObject, NSApplicationDelegate {
         )
 
         // Register Option+Space (keycode 49 = Space, optionKey modifier)
-        var hotKeyID = EventHotKeyID(signature: OSType(0x41544D52), id: 1)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x41544D52), id: 1)
 
         let status = RegisterEventHotKey(
             UInt32(kVK_Space),
@@ -236,6 +259,24 @@ class PanelDelegate: NSObject, NSApplicationDelegate {
             fputs("[SwiftPanel] Global hotkey registered: ⌥Space (Option+Space) to interrupt\n", stderr)
         } else {
             fputs("[SwiftPanel] Failed to register hotkey (status: \(status))\n", stderr)
+        }
+
+        // Register Option+S for screenshot (keycode 1 = S key)
+        let ssHotKeyID = EventHotKeyID(signature: OSType(0x41544D52), id: 2)
+
+        let ssStatus = RegisterEventHotKey(
+            UInt32(kVK_ANSI_S),
+            UInt32(optionKey),
+            ssHotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &screenshotHotKeyRef
+        )
+
+        if ssStatus == noErr {
+            fputs("[SwiftPanel] Global hotkey registered: ⌥S (Option+S) for screenshot\n", stderr)
+        } else {
+            fputs("[SwiftPanel] Failed to register screenshot hotkey (status: \(ssStatus))\n", stderr)
         }
     }
 

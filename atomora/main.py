@@ -15,6 +15,8 @@ from atomora.perception.window_monitor import get_frontmost_pdf_path
 from atomora.perception.pdf_extractor import extract_text
 from atomora.perception.microphone import Microphone
 from atomora.conversation.llm_client import LLMClient
+from atomora.agent.agent_loop import AgentLoop
+from atomora.agent.tools import execute_tool as _execute_tool_fn, set_current_pdf
 from atomora.voice.tts import TTSEngine, _strip_for_speech, SENTENCE_BOUNDARY
 from atomora.stt import transcribe_wav
 from atomora.ui.chat_panel import ChatPanel
@@ -50,7 +52,8 @@ class AtomOraApp(rumps.App):
         # State
         self.paper: dict | None = None
         self._processing = False
-        self._interrupted = False  # Set by double-space interrupt
+        self._interrupted = False  # Set by ⌥Space interrupt
+        self._pending_images: list[dict] = []  # User-captured screenshots
 
         # Components
         self.mic = Microphone(self.settings.get("voice", {}).get("stt", {}))
@@ -59,7 +62,19 @@ class AtomOraApp(rumps.App):
             secrets=self.secrets,
         )
         self.tts = TTSEngine(self.settings.get("voice", {}).get("tts", {}))
-        self.chat_panel = ChatPanel(on_interrupt=self._on_interrupt)
+        self.chat_panel = ChatPanel(
+            on_interrupt=self._on_interrupt,
+            on_screenshot=self._on_screenshot_requested,
+        )
+
+        # Agent (tool-use loop wrapping LLM)
+        agent_config = self.settings.get("agent", {})
+        self.agent = AgentLoop(
+            llm=self.llm,
+            max_tool_rounds=agent_config.get("max_tool_rounds", 5),
+            on_tool_start=self._on_tool_start,
+            on_tool_end=self._on_tool_end,
+        )
 
         # Menu items
         self.menu_status = rumps.MenuItem("Status: Idle")
@@ -96,6 +111,36 @@ class AtomOraApp(rumps.App):
         print("[AtomOra] 🛑 Interrupted (⌥Space)")
         self._interrupted = True
         self.tts.stop()
+
+    def _on_tool_start(self, tool_name: str, args: dict):
+        """Show tool execution status in chat panel."""
+        print(f"[AtomOra] 🔧 Tool: {tool_name}")
+        self.chat_panel.append_message("system", f"📸 {tool_name}...")
+        self._set_status(f"🔧 {tool_name}...")
+
+    def _on_tool_end(self, tool_name: str, result):
+        """Update chat panel after tool execution."""
+        if result.is_error:
+            self.chat_panel.append_message("system", f"⚠️ {tool_name} failed")
+            print(f"[AtomOra] Tool {tool_name} failed")
+        else:
+            self.chat_panel.append_message("system", f"✓ {tool_name} done")
+            print(f"[AtomOra] Tool {tool_name} completed")
+
+    def _on_screenshot_requested(self):
+        """Handle ⌥S: capture screen and attach to next voice message."""
+        from atomora.agent.tools import _execute_take_screenshot
+        result = _execute_take_screenshot({})
+        if result.is_error:
+            self.chat_panel.append_message("system", "⚠️ Screenshot failed")
+            return
+
+        # Store image blocks for next message
+        self._pending_images = [
+            block for block in result.content if block.get("type") == "image"
+        ]
+        self.chat_panel.append_message("system", "📸 Screenshot captured — will attach to your next message")
+        print("[AtomOra] 📸 Screenshot captured, pending for next message")
 
     # ─── Actions ──────────────────────────────────────────────────────
 
@@ -138,6 +183,7 @@ class AtomOraApp(rumps.App):
                 max_chars=pdf_config.get("max_chars", 100_000),
             )
             self.llm.set_paper(self.paper)
+            set_current_pdf(pdf_path)
 
             title = self.paper["title"]
             pages = self.paper["num_pages"]
@@ -255,7 +301,10 @@ class AtomOraApp(rumps.App):
     # ─── Streaming Pipeline ───────────────────────────────────────────
 
     def _stream_and_speak(self, user_message: str) -> str:
-        """Stream LLM → sentence accumulator → TTS.
+        """Stream agent (LLM + tools) → sentence accumulator → TTS.
+
+        The agent loop handles tool calls transparently — from here we
+        just iterate over text chunks, same as before.
 
         Streams text to the chat panel in real-time.
         Stops early if interrupted (tts._speaking becomes False).
@@ -264,16 +313,24 @@ class AtomOraApp(rumps.App):
         full_text = ""
         sentence_buf = ""
 
+        # Grab any pending user-captured screenshots
+        images = self._pending_images if self._pending_images else None
+        self._pending_images = []
+
         # Create assistant message placeholder for live updates
         self.chat_panel.append_message("assistant", "...")
 
         def sentence_stream():
-            """Yield clean sentences as they're completed by the LLM stream."""
+            """Yield clean sentences as they're completed by the agent stream."""
             nonlocal full_text, sentence_buf
 
             try:
-                for chunk in self.llm.chat_stream(user_message):
-                    # Stop consuming LLM tokens on interrupt
+                for chunk in self.agent.stream(
+                    user_message,
+                    images=images,
+                    interrupt_check=lambda: self._interrupted,
+                ):
+                    # Stop consuming tokens on interrupt
                     if self._interrupted or not self.tts._speaking:
                         break
 
@@ -293,7 +350,7 @@ class AtomOraApp(rumps.App):
                         sentence_buf = parts[-1]
 
             except Exception as e:
-                print(f"[AtomOra] LLM stream error: {e}")
+                print(f"[AtomOra] Agent stream error: {e}")
 
             # Flush remaining buffer (skip if interrupted)
             if sentence_buf.strip() and not self._interrupted:

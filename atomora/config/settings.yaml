@@ -41,3 +41,7 @@ voice:
 pdf:
   max_pages: 50                     # Skip papers longer than this
   max_chars: 100000                 # Truncate extracted text
+
+agent:
+  max_tool_rounds: 5                # Max tool calls per conversation turn
+  screenshot_max_width: 1920        # Resize screenshots before sending to API
