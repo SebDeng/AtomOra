@@ -4,10 +4,24 @@
 
 ## What It Does
 
+### Talking Sidebar (interactive)
 1. **Load a paper** — AtomOra detects the frontmost PDF (Preview/Acrobat), extracts the text, and speaks an initial observation.
 2. **Ambient listening** — Always-on microphone with VAD (voice activity detection). Just start talking — no buttons, no triggers.
 3. **Streaming conversation** — Your speech is transcribed, streamed to an LLM with the paper context, and spoken back sentence-by-sentence. A floating chat panel shows text in real-time.
-4. **Interrupt anytime** — Press **⌥Space** (Option+Space) to stop the AI mid-sentence and take the floor.
+4. **Agentic vision** — The LLM can extract specific figures from the PDF or screenshot your screen autonomously. Press **⌥S** to manually capture a screenshot.
+5. **Interrupt anytime** — Press **⌥Space** (Option+Space) to stop the AI mid-sentence and take the floor.
+
+### Daily Paper Briefing (automated)
+6. **Multi-source fetching** — Pulls recent papers from arXiv, OpenAlex, and Semantic Scholar in parallel.
+7. **Smart dedup** — Merges duplicates across sources (DOI → arXiv ID → title), prefers journal versions over preprints while keeping arXiv PDF links.
+8. **AI filtering** — Sonnet 4.5 batch-scores all papers against your research profile and writes one-line summaries (~$0.10-0.25/day).
+9. **Delivery** — Slack (Block Kit), local Markdown file, and macOS notification.
+
+```bash
+python -m atomora.briefing.run_briefing           # full run
+python -m atomora.briefing.run_briefing --days 3   # look back 3 days
+python -m atomora.briefing.run_briefing --dry-run  # console preview only
+```
 
 AtomOra is not an assistant. It's a research colleague — it has opinions, asks probing questions, and tells you what you need to hear.
 
@@ -22,14 +36,19 @@ AtomOra is not an assistant. It's a research colleague — it has opinions, asks
 │  Perception                                          │
 │  ├── window_monitor.py  — Detect frontmost PDF       │
 │  ├── pdf_extractor.py   — Extract text (pymupdf)     │
+│  ├── figure_extractor.py— Smart figure cropping      │
 │  └── microphone.py      — Ambient VAD (silero-vad)   │
 │                                                      │
 │  STT                                                 │
 │  └── stt.py             — whisper.cpp transcription   │
 │                                                      │
+│  Agent                                               │
+│  ├── agent_loop.py      — Agentic tool-use loop      │
+│  └── tools.py           — screenshot, figure extract │
+│                                                      │
 │  Conversation                                        │
 │  ├── llm_client.py      — Gemini / Claude streaming   │
-│  └── prompts.py         — Colleague persona          │
+│  └── prompts.py         — Colleague persona + tools  │
 │                                                      │
 │  Voice                                               │
 │  └── tts.py             — Streaming Edge TTS         │
@@ -37,7 +56,13 @@ AtomOra is not an assistant. It's a research colleague — it has opinions, asks
 │  UI                                                  │
 │  ├── chat_panel.py      — Python ↔ Swift bridge      │
 │  └── AtomOraPanel.swift — Native floating panel +    │
-│                           global hotkey (Carbon)     │
+│                           ⌥Space / ⌥S hotkeys       │
+│                                                      │
+│  Briefing                                            │
+│  ├── sources/            — arXiv, OpenAlex, S2       │
+│  ├── filter.py           — Dedup + Sonnet 4.5 filter │
+│  ├── delivery/           — Slack, Markdown, notif    │
+│  └── run_briefing.py     — Pipeline orchestrator     │
 │                                                      │
 └──────────────────────────────────────────────────────┘
 ```
@@ -113,6 +138,14 @@ gemini:
 
 anthropic:
   api_key: YOUR_ANTHROPIC_API_KEY
+
+# Optional — for daily briefing
+openalex:
+  email: "your@email.com"         # For polite pool (faster rate limits)
+slack:
+  webhook_url: ""                  # Slack incoming webhook URL
+semanticscholar:
+  api_key: ""                      # Optional, increases rate limits
 ```
 
 ### Run
@@ -136,13 +169,20 @@ All settings in [`atomora/config/settings.yaml`](atomora/config/settings.yaml):
 | `voice.stt.silence_duration` | `1.0` | Seconds of silence to end recording |
 | `voice.stt.min_speech_duration` | `0.8` | Minimum speech to process (skip noise) |
 | `pdf.max_pages` | `50` | Skip PDFs longer than this |
+| `briefing.relevance_threshold` | `0.6` | Minimum score for paper inclusion |
+| `briefing.max_papers` | `10` | Max papers per briefing |
+| `briefing.arxiv_categories` | `[cond-mat.mtrl-sci, ...]` | arXiv categories to monitor |
+| `briefing.s2_queries` | `["hexagonal boron nitride", ...]` | Semantic Scholar search terms |
 
 ## Controls
 
 | Control | Action |
 |---------|--------|
 | **⌥Space** | Interrupt AI speech (global, works from any app) |
+| **⌥S** | Capture screenshot and attach to next message |
 | 🎤 Listening / 🔇 Muted | Toggle ambient microphone |
+| 🎤 Microphone ▸ | Select input device |
+| 🔊 Speaker ▸ | Select output device |
 | Load Paper (⌘⇧A) | Detect and load frontmost PDF |
 | Show Chat | Toggle floating conversation panel |
 | Switch to Gemini/Claude | Swap active LLM |
@@ -156,8 +196,11 @@ All settings in [`atomora/config/settings.yaml`](atomora/config/settings.yaml):
 | Window detection | PyObjC (NSWorkspace) |
 | VAD | [silero-vad](https://github.com/snakers4/silero-vad) |
 | STT | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) |
-| LLM | Claude Opus 4.6 / Gemini 2.5 Pro (streaming) |
+| LLM (interactive) | Claude Opus 4.6 / Gemini 2.5 Pro (streaming) |
+| LLM (briefing filter) | Claude Sonnet 4.5 (batch scoring) |
 | TTS | [Edge TTS](https://github.com/rany2/edge-tts) (sentence-level streaming) |
+| Paper sources | [arxiv](https://pypi.org/project/arxiv/), [pyalex](https://pypi.org/project/pyalex/), [semanticscholar](https://pypi.org/project/semanticscholar/) |
+| Slack delivery | requests (incoming webhook, Block Kit) |
 | Chat panel | SwiftUI (NSPanel, dark ultra-thin material) |
 | Global hotkey | Carbon RegisterEventHotKey |
 | Audio I/O | [sounddevice](https://python-sounddevice.readthedocs.io/) |
