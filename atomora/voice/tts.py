@@ -16,6 +16,20 @@ import threading
 import time
 
 
+def _resolve_device(name: str | None, kind: str) -> int | None:
+    """Resolve a device name to a sounddevice index."""
+    if not name:
+        return None
+    import sounddevice as sd
+    devices = sd.query_devices()
+    channel_key = "max_input_channels" if kind == "input" else "max_output_channels"
+    for i, d in enumerate(devices):
+        if d[channel_key] > 0 and name.lower() in d["name"].lower():
+            return i
+    print(f"[Audio] Device '{name}' ({kind}) not found, using default")
+    return None
+
+
 class TTSEngine:
     """TTS engine supporting Edge TTS and macOS say fallback."""
 
@@ -24,6 +38,8 @@ class TTSEngine:
         self.engine = config.get("engine", "edge")
         self._speaking = False
         self._process: subprocess.Popen | None = None
+        self._device_name: str | None = config.get("device_name")
+        self._device_id: int | None = _resolve_device(self._device_name, "output")
 
     # ─── Public API ───────────────────────────────────────────────────
 
@@ -76,6 +92,12 @@ class TTSEngine:
     @property
     def is_speaking(self) -> bool:
         return self._speaking
+
+    def set_device(self, name: str | None):
+        """Change the output device. Takes effect on next playback."""
+        self._device_name = name
+        self._device_id = _resolve_device(name, "output")
+        print(f"[TTS] Device set: {name or 'system default'} (id={self._device_id})")
 
     # ─── Internal ─────────────────────────────────────────────────────
 
@@ -176,7 +198,7 @@ class TTSEngine:
             data, sr, idx = item
             duration = len(data) / sr
             print(f"[TTS] seg[{idx}] playing:   {_ts():.2f}s (audio {duration:.1f}s)")
-            sd.play(data, samplerate=sr)
+            sd.play(data, samplerate=sr, device=self._device_id)
             sd.wait()
 
         # Drain queue so producer thread can finish

@@ -140,7 +140,7 @@ class AgentLoop:
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": tc.id,
-                    "_tool_name": tc.name,
+
                     "content": [{"type": "text", "text": "Interrupted by user."}],
                     "is_error": True,
                 })

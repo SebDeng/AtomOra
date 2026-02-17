@@ -21,9 +21,11 @@ Phase 1 (Talking Sidebar) is complete. Phase 3.1 adds agentic tool use:
 2. AI pre-reads and speaks initial observations (interruptible)
 3. Ambient microphone listens continuously via VAD
 4. Speech → STT → **Agent Loop** (LLM + tool calls) → TTS → Speaker
-5. LLM can **autonomously screenshot** the screen to analyze figures/charts
-6. User can **manually capture** screenshots via **⌥S** hotkey
-7. Floating chat panel shows conversation + tool execution in real-time
+5. LLM can **extract specific figures** from the PDF (caption-aware cropping)
+6. LLM can **autonomously screenshot** the screen to analyze anything on-screen
+7. User can **manually capture** screenshots via **⌥S** hotkey
+8. **Audio device selection** — choose microphone and speaker from menubar
+9. Floating chat panel shows conversation + tool execution in real-time
 
 ## Architecture
 
@@ -37,6 +39,8 @@ Phase 1 (Talking Sidebar) is complete. Phase 3.1 adds agentic tool use:
 │  ├── window_monitor.py  — Detect frontmost PDF +     │
 │  │                        get window ID for capture   │
 │  ├── pdf_extractor.py   — Extract text (pymupdf)     │
+│  ├── figure_extractor.py— Smart figure cropping      │
+│  │                        (caption + image region)    │
 │  └── microphone.py      — Ambient VAD (silero-vad)   │
 │                                                      │
 │  STT                                                 │
@@ -72,6 +76,8 @@ Mic (always on)
       → whisper.cpp STT
         → Agent Loop (LLM + tool execution)
           ├── LLM streams tokens → text chunks
+          ├── LLM calls tool (extract_pdf_figure)
+          │     → caption detection → region crop → base64 PNG → back to LLM
           └── LLM calls tool (take_screenshot)
                 → screencapture → base64 PNG → back to LLM
                 → LLM analyzes image → text chunks
@@ -82,13 +88,15 @@ Mic (always on)
 ```
 
 Key design decisions:
-- **Agentic loop**: LLM can call tools (screenshot) autonomously, like Claude Code
+- **Agentic loop**: LLM can call tools autonomously, like Claude Code
 - **Agent yields text only**: tool calls handled transparently inside the loop
+- **Figure extraction preferred** over screenshot for numbered figures — cleaner, more focused
 - **LLM streams tokens** → accumulated into sentences → TTS processes per-sentence
 - **Mic paused during TTS** (sleep, not drain) to avoid audio contention
 - **Overflow detection** on mic resume to skip stale audio
 - **Interrupt via ⌥Space** — Carbon RegisterEventHotKey (no Accessibility permission needed)
 - **Screenshot via ⌥S** — user-initiated capture, attached to next voice message
+- **Audio device selection** — stored by name (not index), resolved at runtime
 
 ### Interrupt Flow (⌥Space)
 
@@ -123,26 +131,31 @@ Key design decisions:
 
 ```
 atomora/
-├── main.py                    # Entry point, menubar app, streaming pipeline
+├── main.py                    # Entry point, menubar app, streaming pipeline,
+│                              #   audio device menus, settings persistence
 ├── perception/
 │   ├── microphone.py          # Ambient VAD listening (silero-vad + sounddevice)
+│   │                          #   configurable input device
 │   ├── window_monitor.py      # Active window/PDF detection + screenshot (pyobjc)
-│   └── pdf_extractor.py       # Text extraction (pymupdf)
+│   ├── pdf_extractor.py       # Text extraction (pymupdf)
+│   └── figure_extractor.py    # Smart figure extraction (caption-aware cropping)
 ├── stt.py                     # whisper.cpp STT wrapper
 ├── agent/
 │   ├── agent_loop.py          # Agentic tool-use loop (LLM → tool → LLM)
-│   └── tools.py               # Tool definitions + executors (screenshot, etc.)
+│   └── tools.py               # Tool definitions + executors
+│                              #   (take_screenshot, extract_pdf_figure)
 ├── conversation/
 │   ├── llm_client.py          # Gemini + Claude streaming (text + tools + vision)
 │   └── prompts.py             # System prompts (colleague persona + tools)
 ├── voice/
 │   └── tts.py                 # Streaming Edge TTS (producer-consumer pipeline)
+│                              #   configurable output device
 ├── ui/
 │   ├── chat_panel.py          # Python ↔ Swift bridge (stdin/stdout JSON)
 │   ├── AtomOraPanel.swift     # Native SwiftUI panel + ⌥Space/⌥S hotkeys
 │   └── AtomOraPanel.bin       # Compiled Swift binary
 ├── config/
-│   ├── settings.yaml          # General settings
+│   ├── settings.yaml          # General settings (incl. device_name for mic/speaker)
 │   └── secrets.yaml           # API keys (gitignored)
 ├── docs/
 │   └── tts-streaming.md       # TTS architecture and benchmarks
@@ -159,6 +172,8 @@ atomora/
 - During TTS pause: **sleep** (not read) to avoid audio hardware contention
 - After resume: **overflow detection** skips stale buffered audio
 - VAD state reset on each new listen session
+- Configurable input device via `device_name` in config → resolved to `sounddevice` index
+- `set_device(name)` for hot-swapping from menubar
 
 ### LLM Streaming (llm_client.py)
 - `chat_stream()` generator with `try/finally` for history management
@@ -172,6 +187,8 @@ atomora/
 - Consumer plays audio via sounddevice on calling thread
 - On interrupt: producer checks `_speaking` after each edge_generate, drains queue, joins thread
 - Language detection on first sentence (Chinese ≥20% → Chinese voice)
+- Configurable output device via `device_name` in config → resolved to `sounddevice` index
+- `set_device(name)` for hot-swapping from menubar
 - See [docs/tts-streaming.md](docs/tts-streaming.md) for benchmarks
 
 ### Chat Panel (AtomOraPanel.swift)
@@ -189,13 +206,33 @@ atomora/
 - Interrupt check between each tool call and stream event
 - Tools defined in `agent/tools.py` with Claude-format schemas, converted to Gemini at runtime
 
-### Vision / Screenshot (agent/tools.py)
-- `take_screenshot`: captures frontmost window via `screencapture -l <windowid>`
+### Figure Extraction (perception/figure_extractor.py)
+- **Caption-first detection**: regex finds "Fig. N" / "Figure N" captions, then locates image regions
+- Three PDF figure patterns handled: pre-composited raster, multi-image + vector, extreme vector
+- `_find_captions(page)` → regex on text blocks, returns sorted list of `(fig_num, label, y, bbox)`
+- `_find_figure_region(page, caption, prev_caption_bottom)` → finds all images in vertical band between consecutive captions
+- `_merge_split_captions(captions)` → handles two-column caption splits (same fig number on same page)
+- Renders via `page.get_pixmap(clip=rect, dpi=200)` for high-quality crops
+- Deduplication: when same figure number appears on multiple pages, keeps the largest rendering
+- `extract_figures(pdf_path)` → all figures; `extract_figure_by_number(pdf_path, n)` → single figure
+
+### Vision Tools (agent/tools.py)
+- **`extract_pdf_figure`** (preferred for numbered figures): calls figure_extractor, returns base64 PNG + caption
+- **`take_screenshot`** (fallback for non-numbered visuals): captures frontmost window via `screencapture -l <windowid>`
 - Window ID from `get_frontmost_window_id()` in window_monitor.py (CGWindowListCopyWindowInfo)
 - Resizes images >1920px wide via `sips` to control API cost
 - Returns base64 PNG as image content block in Claude API format
-- LLM decides autonomously when to screenshot (proactive tool use)
-- User can also trigger via **⌥S** hotkey → image attached to next voice message
+- LLM decides autonomously which tool to use (proactive tool use)
+- User can also trigger screenshot via **⌥S** hotkey → image attached to next voice message
+- `set_current_pdf(path)` called by main.py when a paper is loaded
+
+### Audio Device Selection (main.py)
+- Menubar submenus: 🎤 Microphone ▸ and 🔊 Speaker ▸ with checkmark on current device
+- Lists devices from `sd.query_devices()`, filters by input/output channels
+- Devices stored **by name** (not index) — indices change between reboots
+- `_save_settings()` persists device choice to `settings.yaml` via `yaml.dump()`
+- Hot-swaps via `mic.set_device(name)` / `tts.set_device(name)` — takes effect immediately
+- Falls back to system default if saved device not found
 
 ### Tool-Aware LLM Streaming (llm_client.py)
 - `chat_stream_with_tools()`: iterates over raw stream events (not text_stream)
@@ -203,6 +240,7 @@ atomora/
 - Gemini: checks `part.function_call` in stream chunks
 - History supports both string content and structured content blocks (tool_use, tool_result, images)
 - `_messages_to_gemini_contents()`: converts Claude-format messages to Gemini Content objects
+- **Important**: Claude API tool_result blocks must NOT contain extra fields — strict schema validation
 
 ### Sentence Accumulator (main.py `_stream_and_speak`)
 - LLM tokens accumulated into `sentence_buf`

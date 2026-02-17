@@ -21,6 +21,12 @@ silero-vad>=5.1             # Voice activity detection
 # mlx-vlm                   # Qwen3-VL vision
 # sentence-transformers     # GTE embeddings
 
+# --- Phase 3.2: Daily Briefing ---
+arxiv>=2.1.0                # arXiv API client
+pyalex>=0.14                # OpenAlex API client
+semanticscholar>=0.8.3      # Semantic Scholar API client
+requests>=2.31.0            # HTTP for Slack webhook
+
 # --- Config ---
 pyyaml>=6.0                 # YAML config files
 

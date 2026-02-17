@@ -26,9 +26,7 @@ atomora/config/secrets.yaml
 .LSOverride
 
 # Data
-data/embeddings/
-data/graph/
-data/history.json
+data/
 
 # IDE
 .idea/

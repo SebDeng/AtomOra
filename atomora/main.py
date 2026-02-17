@@ -10,6 +10,7 @@ import threading
 import time
 import yaml
 import rumps
+import sounddevice as sd
 
 from atomora.perception.window_monitor import get_frontmost_pdf_path
 from atomora.perception.pdf_extractor import extract_text
@@ -31,7 +32,7 @@ def load_yaml(filename: str) -> dict:
     path = os.path.join(CONFIG_DIR, filename)
     if os.path.exists(path):
         with open(path) as f:
-            return yaml.safe_load(f) or {}
+            return yaml.load(f, Loader=yaml.UnsafeLoader) or {}
     return {}
 
 
@@ -87,6 +88,11 @@ class AtomOraApp(rumps.App):
         self.menu_switch = rumps.MenuItem(f"Switch to {other_model}", callback=self.on_switch_model)
         self.menu_chat = rumps.MenuItem("Show Chat ✦", callback=self.on_toggle_chat)
 
+        # Audio device menus
+        self.menu_mic_devices = rumps.MenuItem("Microphone")
+        self.menu_spk_devices = rumps.MenuItem("Speaker")
+        self._build_audio_menus()
+
         self.menu = [
             self.menu_status,
             self.menu_paper,
@@ -97,6 +103,9 @@ class AtomOraApp(rumps.App):
             None,
             self.menu_model,
             self.menu_switch,
+            None,
+            self.menu_mic_devices,
+            self.menu_spk_devices,
         ]
 
         # Auto-open chat panel
@@ -383,6 +392,80 @@ class AtomOraApp(rumps.App):
             self.llm.primary = "gemini"
             self.menu_model.title = "Model: gemini"
             self.menu_switch.title = "Switch to Claude"
+
+    # ─── Audio device selection ────────────────────────────────────────
+
+    def _build_audio_menus(self):
+        """Populate microphone and speaker submenus from available devices.
+
+        Uses dict-style assignment (menu_item[key] = child) which works
+        before the app's NSMenu is initialized by rumps.
+        """
+        devices = sd.query_devices()
+        stt_config = self.settings.get("voice", {}).get("stt", {})
+        tts_config = self.settings.get("voice", {}).get("tts", {})
+        current_mic = stt_config.get("device_name")
+        current_spk = tts_config.get("device_name")
+
+        # Mic: "System Default" + all input devices
+        item = rumps.MenuItem("System Default", callback=self._on_select_mic)
+        item.state = 1 if current_mic is None else 0
+        self.menu_mic_devices["System Default"] = item
+
+        for d in devices:
+            if d["max_input_channels"] > 0:
+                name = d["name"]
+                item = rumps.MenuItem(name, callback=self._on_select_mic)
+                if current_mic and current_mic.lower() in name.lower():
+                    item.state = 1
+                self.menu_mic_devices[name] = item
+
+        # Speaker: "System Default" + all output devices
+        item = rumps.MenuItem("System Default", callback=self._on_select_spk)
+        item.state = 1 if current_spk is None else 0
+        self.menu_spk_devices["System Default"] = item
+
+        for d in devices:
+            if d["max_output_channels"] > 0:
+                name = d["name"]
+                item = rumps.MenuItem(name, callback=self._on_select_spk)
+                if current_spk and current_spk.lower() in name.lower():
+                    item.state = 1
+                self.menu_spk_devices[name] = item
+
+    def _on_select_mic(self, sender):
+        """Handle microphone device selection."""
+        name = sender.title if sender.title != "System Default" else None
+        # Update checkmarks
+        for item in self.menu_mic_devices.values():
+            item.state = 0
+        sender.state = 1
+        # Apply
+        self.mic.set_device(name)
+        self.settings.setdefault("voice", {}).setdefault("stt", {})["device_name"] = name
+        self._save_settings()
+
+    def _on_select_spk(self, sender):
+        """Handle speaker device selection."""
+        name = sender.title if sender.title != "System Default" else None
+        # Update checkmarks
+        for item in self.menu_spk_devices.values():
+            item.state = 0
+        sender.state = 1
+        # Apply
+        self.tts.set_device(name)
+        self.settings.setdefault("voice", {}).setdefault("tts", {})["device_name"] = name
+        self._save_settings()
+
+    def _save_settings(self):
+        """Persist current settings to settings.yaml."""
+        path = os.path.join(CONFIG_DIR, "settings.yaml")
+        try:
+            with open(path, "w") as f:
+                yaml.dump(self.settings, f, default_flow_style=False, allow_unicode=True)
+            print("[AtomOra] Settings saved")
+        except Exception as e:
+            print(f"[AtomOra] Failed to save settings: {e}")
 
     # ─── Helpers ──────────────────────────────────────────────────────
 

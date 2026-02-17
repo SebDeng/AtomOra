@@ -14,6 +14,22 @@ import numpy as np
 import sounddevice as sd
 
 
+def _resolve_device(name: str | None, kind: str) -> int | None:
+    """Resolve a device name to a sounddevice index.
+
+    Returns None (system default) if name is None or not found.
+    """
+    if not name:
+        return None
+    devices = sd.query_devices()
+    channel_key = "max_input_channels" if kind == "input" else "max_output_channels"
+    for i, d in enumerate(devices):
+        if d[channel_key] > 0 and name.lower() in d["name"].lower():
+            return i
+    print(f"[Audio] Device '{name}' ({kind}) not found, using default")
+    return None
+
+
 class Microphone:
     """Ambient microphone with VAD-based speech detection."""
 
@@ -21,6 +37,8 @@ class Microphone:
         self.sample_rate = config.get("sample_rate", 16000)
         self.silence_duration = config.get("silence_duration", 1.5)
         self.min_speech_duration = config.get("min_speech_duration", 0.8)
+        self._device_name: str | None = config.get("device_name")
+        self._device_id: int | None = _resolve_device(self._device_name, "input")
 
         self._running = False
         self._paused = False  # Paused during TTS playback
@@ -70,6 +88,12 @@ class Microphone:
         """Resume listening after pause."""
         self._paused = False
 
+    def set_device(self, name: str | None):
+        """Change the input device. Takes effect on next listen loop restart."""
+        self._device_name = name
+        self._device_id = _resolve_device(name, "input")
+        print(f"[Microphone] Device set: {name or 'system default'} (id={self._device_id})")
+
     def _listen_loop(self):
         """Main listening loop — runs continuously in background.
 
@@ -97,6 +121,7 @@ class Microphone:
                     time.sleep(0.3)
 
                 with sd.InputStream(
+                    device=self._device_id,
                     samplerate=self.sample_rate,
                     channels=1,
                     dtype="float32",
