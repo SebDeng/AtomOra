@@ -13,10 +13,11 @@ The persona is the **Donna Paulsen model**: someone who knows your entire contex
 has her own judgment, and doesn't wait to be asked. Bilingual Chinese-English,
 naturally code-switching.
 
-## Current State (Phase 3.1 — Agentic Vision)
+## Current State (Phase 3.2 — Daily Paper Briefing)
 
-Phase 1 (Talking Sidebar) is complete. Phase 3.1 adds agentic tool use:
+Phase 1 (Talking Sidebar), Phase 3.1 (Agentic Vision), and Phase 3.2 (Daily Briefing) are complete.
 
+**Interactive session:**
 1. Load a PDF (detected from frontmost window)
 2. AI pre-reads and speaks initial observations (interruptible)
 3. Ambient microphone listens continuously via VAD
@@ -26,6 +27,14 @@ Phase 1 (Talking Sidebar) is complete. Phase 3.1 adds agentic tool use:
 7. User can **manually capture** screenshots via **⌥S** hotkey
 8. **Audio device selection** — choose microphone and speaker from menubar
 9. Floating chat panel shows conversation + tool execution in real-time
+
+**Daily paper briefing** (`python -m atomora.briefing.run_briefing`):
+1. Fetches papers from **arXiv**, **OpenAlex**, **Semantic Scholar** (parallel, fault-tolerant)
+2. Deduplicates across sources (DOI → arXiv ID → title), prefers journal versions
+3. Filters out conference proceedings (by publication type + journal name heuristic)
+4. **Sonnet 4.5** batch-scores all papers against research profile (~$0.10-0.25/day)
+5. Delivers: **Slack** (Block Kit) + **local Markdown** + **macOS notification**
+6. CLI: `--days N` (lookback), `--dry-run` (console only), `-v` (verbose)
 
 ## Architecture
 
@@ -63,6 +72,18 @@ Phase 1 (Talking Sidebar) is complete. Phase 3.1 adds agentic tool use:
 │  └── AtomOraPanel.swift — Native floating panel +    │
 │                           ⌥Space interrupt +         │
 │                           ⌥S screenshot hotkey       │
+│                                                      │
+│  Briefing                                            │
+│  ├── sources/            — Paper fetchers             │
+│  │   ├── base.py         — Paper dataclass + ABC     │
+│  │   ├── arxiv_source.py — arXiv API                 │
+│  │   ├── openalex_source.py — OpenAlex API           │
+│  │   └── s2_source.py    — Semantic Scholar API      │
+│  ├── filter.py           — Dedup + Sonnet 4.5 filter │
+│  ├── delivery/           — Output channels           │
+│  │   ├── slack.py        — Slack Block Kit webhook   │
+│  │   └── local.py        — Markdown + macOS notif    │
+│  └── run_briefing.py     — Pipeline orchestrator     │
 │                                                      │
 └──────────────────────────────────────────────────────┘
 ```
@@ -126,6 +147,9 @@ Key design decisions:
 | Chat panel | SwiftUI (NSPanel) | Dark ultra-thin material, stdin/stdout IPC |
 | Global hotkey | Carbon RegisterEventHotKey | ⌥Space interrupt, no Accessibility needed |
 | Audio I/O | sounddevice + soundfile | Input (mic) and output (TTS playback) |
+| Paper filter | Claude Sonnet 4.5 API | Batch relevance scoring for briefing |
+| Paper sources | arxiv, pyalex, semanticscholar | Multi-source paper fetching |
+| Slack | requests (webhook) | Block Kit formatted delivery |
 
 ## Project Structure
 
@@ -154,9 +178,20 @@ atomora/
 │   ├── chat_panel.py          # Python ↔ Swift bridge (stdin/stdout JSON)
 │   ├── AtomOraPanel.swift     # Native SwiftUI panel + ⌥Space/⌥S hotkeys
 │   └── AtomOraPanel.bin       # Compiled Swift binary
+├── briefing/
+│   ├── sources/
+│   │   ├── base.py                # Paper dataclass + PaperSource ABC
+│   │   ├── arxiv_source.py        # arXiv fetcher (by category + date)
+│   │   ├── openalex_source.py     # OpenAlex fetcher (abstract reconstruction)
+│   │   └── s2_source.py           # Semantic Scholar fetcher (bulk API)
+│   ├── filter.py                  # Dedup + batch Sonnet 4.5 scoring
+│   ├── delivery/
+│   │   ├── slack.py               # Slack Block Kit webhook
+│   │   └── local.py               # Markdown file + macOS notification
+│   └── run_briefing.py            # Pipeline orchestrator (CLI entry point)
 ├── config/
-│   ├── settings.yaml          # General settings (incl. device_name for mic/speaker)
-│   └── secrets.yaml           # API keys (gitignored)
+│   ├── settings.yaml          # General settings (incl. device_name, briefing config)
+│   └── secrets.yaml           # API keys + webhook URLs (gitignored)
 ├── docs/
 │   └── tts-streaming.md       # TTS architecture and benchmarks
 ├── CLAUDE.md                  # This file
@@ -242,6 +277,17 @@ atomora/
 - `_messages_to_gemini_contents()`: converts Claude-format messages to Gemini Content objects
 - **Important**: Claude API tool_result blocks must NOT contain extra fields — strict schema validation
 
+### Daily Paper Briefing (briefing/)
+- **Multi-source**: arXiv (by category + submittedDate), OpenAlex (by publication_date + keyword search), Semantic Scholar (bulk API, sorted by date)
+- **Dedup**: DOI → arXiv ID → normalized title; merges metadata preferring journal versions over preprints; keeps arXiv PDF URL for free full-text
+- **Conference filter**: S2 `publicationTypes` field + journal name heuristic (roman numerals, "proceedings", "symposium", etc.) + OpenAlex `type` field
+- **Batch LLM filter**: All papers in ONE Sonnet 4.5 call (batched at 100 if >150). Returns JSON `[{index, score, summary}]`. Research profile in system prompt, configurable in `filter.py`
+- **Search config**: `settings.yaml` → `briefing:` section (categories, concepts, queries, journals, threshold, max_papers)
+- **Secrets**: `secrets.yaml` → `openalex.email` (polite pool), `slack.webhook_url`, `semanticscholar.api_key` (optional)
+- **YAML loader**: Uses `UnsafeLoader` (both `main.py` and `run_briefing.py`) because `_save_settings()` writes `!!python/object/apply` tags for device names
+- **S2 bulk API** doesn't return abstracts — papers included with empty abstract, LLM scores by title + journal
+- **OpenAlex abstract**: Stored as inverted index, reconstructed by `_reconstruct_abstract()`
+
 ### Sentence Accumulator (main.py `_stream_and_speak`)
 - LLM tokens accumulated into `sentence_buf`
 - Split on `SENTENCE_BOUNDARY` regex: `(?<=[.!?])\s+|(?<=[。！？；])`
@@ -269,5 +315,4 @@ atomora/
 ## Future Phases
 
 - **Phase 2**: Ambient context awareness (attention state, address detection)
-- **Phase 3.2**: Daily paper briefing (arXiv RSS → LLM filter → voice summary)
 - **Phase 4**: Knowledge graph, long-term memory across sessions
