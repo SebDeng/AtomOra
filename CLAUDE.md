@@ -13,20 +13,21 @@ The persona is the **Donna Paulsen model**: someone who knows your entire contex
 has her own judgment, and doesn't wait to be asked. Bilingual Chinese-English,
 naturally code-switching.
 
-## Current State (Phase 3.2 — Daily Paper Briefing)
+## Current State (Phase 2 — Ambient Context Awareness)
 
-Phase 1 (Talking Sidebar), Phase 3.1 (Agentic Vision), and Phase 3.2 (Daily Briefing) are complete.
+Phase 1 (Talking Sidebar), Phase 2 (Ambient Context), Phase 3.1 (Agentic Vision), and Phase 3.2 (Daily Briefing) are complete.
 
 **Interactive session:**
-1. Load a PDF (detected from frontmost window)
+1. **Auto PDF detection** — polls frontmost window every 8s, auto-loads new PDFs
 2. AI pre-reads and speaks initial observations (interruptible)
 3. Ambient microphone listens continuously via VAD
-4. Speech → STT → **Agent Loop** (LLM + tool calls) → TTS → Speaker
+4. Speech → STT → **Semantic Gate** (Qwen3-0.6B, local) → **Agent Loop** (LLM + tool calls) → TTS → Speaker
 5. LLM can **extract specific figures** from the PDF (caption-aware cropping)
 6. LLM can **autonomously screenshot** the screen to analyze anything on-screen
 7. User can **manually capture** screenshots via **⌥S** hotkey
 8. **Audio device selection** — choose microphone and speaker from menubar
-9. Floating chat panel shows conversation + tool execution in real-time
+9. **Semantic gate** — local Qwen3-0.6B classifies if speech is directed at AtomOra (toggleable)
+10. Floating chat panel shows conversation + tool execution in real-time
 
 **Daily paper briefing** (`python -m atomora.briefing.run_briefing`):
 1. Fetches papers from **arXiv**, **OpenAlex**, **Semantic Scholar** (parallel, fault-tolerant)
@@ -54,6 +55,10 @@ Phase 1 (Talking Sidebar), Phase 3.1 (Agentic Vision), and Phase 3.2 (Daily Brie
 │                                                      │
 │  STT                                                 │
 │  └── stt.py             — whisper.cpp transcription   │
+│                                                      │
+│  Gate                                                │
+│  └── semantic_gate.py   — Qwen3-0.6B address detect  │
+│                           (local mlx-lm, ~335MB)     │
 │                                                      │
 │  Agent                                               │
 │  ├── agent_loop.py      — Agentic tool-use loop      │
@@ -95,6 +100,9 @@ Mic (always on)
   → silero-vad speech detect
     → Record until silence (1.0s)
       → whisper.cpp STT
+        → Semantic Gate (Qwen3-0.6B, <500ms)
+          ├── "not for me" → silent skip
+          └── "directed" ↓
         → Agent Loop (LLM + tool execution)
           ├── LLM streams tokens → text chunks
           ├── LLM calls tool (extract_pdf_figure)
@@ -109,6 +117,8 @@ Mic (always on)
 ```
 
 Key design decisions:
+- **Semantic gate**: local Qwen3-0.6B classifies directed vs ambient speech — fail-open on error
+- **Auto PDF detection**: `rumps.Timer` polls frontmost window, auto-loads new papers
 - **Agentic loop**: LLM can call tools autonomously, like Claude Code
 - **Agent yields text only**: tool calls handled transparently inside the loop
 - **Figure extraction preferred** over screenshot for numbered figures — cleaner, more focused
@@ -146,6 +156,7 @@ Key design decisions:
 | TTS fallback | macOS `say` | Offline |
 | Chat panel | SwiftUI (NSPanel) | Dark ultra-thin material, stdin/stdout IPC |
 | Global hotkey | Carbon RegisterEventHotKey | ⌥Space interrupt, no Accessibility needed |
+| Semantic gate | mlx-lm + Qwen3-0.6B-4bit | Local address detection (~335MB, <500ms) |
 | Audio I/O | sounddevice + soundfile | Input (mic) and output (TTS playback) |
 | Paper filter | Claude Sonnet 4.5 API | Batch relevance scoring for briefing |
 | Paper sources | arxiv, pyalex, semanticscholar | Multi-source paper fetching |
@@ -164,6 +175,9 @@ atomora/
 │   ├── pdf_extractor.py       # Text extraction (pymupdf)
 │   └── figure_extractor.py    # Smart figure extraction (caption-aware cropping)
 ├── stt.py                     # whisper.cpp STT wrapper
+├── gate/
+│   ├── __init__.py            # Re-exports SemanticGate
+│   └── semantic_gate.py       # Qwen3-0.6B address classification (mlx-lm)
 ├── agent/
 │   ├── agent_loop.py          # Agentic tool-use loop (LLM → tool → LLM)
 │   └── tools.py               # Tool definitions + executors
@@ -200,6 +214,23 @@ atomora/
 ```
 
 ## Key Implementation Details
+
+### Semantic Gate (gate/semantic_gate.py)
+- **Qwen3-0.6B-4bit** via `mlx-lm` — ~335MB memory, <500ms per classification
+- Lazy-loaded: model only loads on first `is_directed()` call (or first `set_enabled(True)`)
+- `enable_thinking=False` in `apply_chat_template` to skip Qwen3 thinking mode for speed
+- `max_tokens=3`, `temp=0.0` — deterministic, minimal output ("yes"/"no")
+- **Fail-open**: any error → `True` (speech passes through to LLM)
+- Graceful degradation: if model load fails, gate disables itself permanently
+- Toggleable from menubar: "🧠 Gate: On/Off"
+- Config: `settings.yaml` → `gate:` section (enabled, model, max_tokens, temperature)
+
+### Auto PDF Detection (main.py)
+- `rumps.Timer` polls `get_frontmost_pdf_path()` every 8 seconds (configurable)
+- Skips if `_processing` or `tts.is_speaking` (don't interrupt active conversation)
+- Compares detected path vs `self.paper["path"]` to avoid reloading same paper
+- `os.path.isfile()` check filters out window titles that aren't real file paths
+- On new PDF: reuses `on_load_paper()` (extract text, set context, preread)
 
 ### Microphone (microphone.py)
 - silero-vad requires **512 samples minimum** at 16kHz (not 480)
@@ -314,5 +345,4 @@ atomora/
 
 ## Future Phases
 
-- **Phase 2**: Ambient context awareness (attention state, address detection)
 - **Phase 4**: Knowledge graph, long-term memory across sessions

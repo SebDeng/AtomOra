@@ -1,7 +1,13 @@
 agent:
   max_tool_rounds: 5
   screenshot_max_width: 1920
+gate:
+  enabled: true
+  model: mlx-community/Qwen3-0.6B-4bit
+  max_tokens: 3
+  temperature: 0.0
 app:
+  auto_pdf_interval: 8
   hotkey_load_paper: cmd+shift+a
   hotkey_talk: cmd+shift+r
   max_conversation_history: 20
@@ -33,11 +39,23 @@ briefing:
     - materials science
     - nanotechnology
     - optics
+    - phonon polariton
+    - transition metal dichalcogenide
+    - Raman spectroscopy
+    - electron microscopy
   s2_queries:
-    - hexagonal boron nitride
-    - single-photon emitter
-    - cathodoluminescence STEM
-    - quantum emitter 2D materials
+    - hexagonal boron nitride (hBN)
+    - single photon emitter
+    - hBN color center
+    - phonon polariton 
+    - 2D materials
+    - transition metal dichalcogenide (TMD) 
+    - CVD growth
+    - chemical vapor deposition
+    - cathodoluminescence 
+    - aberration-corrected STEM 
+    - photoluminescence Raman 
+    - quantum emitter nanophotonics
   journals:
     - Nature
     - Science
@@ -45,18 +63,23 @@ briefing:
     - Nature Physics
     - Nature Materials
     - Nature Nanotechnology
+    - Nature Communications
     - Physical Review Letters
     - Physical Review B
+    - Physical Review X
     - Nano Letters
     - ACS Nano
     - ACS Photonics
     - Advanced Materials
+    - Advanced Functional Materials
     - Optica
     - 2D Materials
     - npj 2D Materials and Applications
     - 'Light: Science & Applications'
+    - Ultramicroscopy
+    - Microscopy and Microanalysis
   relevance_threshold: 0.6
-  max_papers: 10
+  max_papers: 20
 pdf:
   max_chars: 100000
   max_pages: 50

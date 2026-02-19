@@ -21,6 +21,7 @@ from atomora.agent.tools import execute_tool as _execute_tool_fn, set_current_pd
 from atomora.voice.tts import TTSEngine, _strip_for_speech, SENTENCE_BOUNDARY
 from atomora.stt import transcribe_wav
 from atomora.ui.chat_panel import ChatPanel
+from atomora.gate import SemanticGate
 
 
 # ─── Config ───────────────────────────────────────────────────────────
@@ -77,6 +78,9 @@ class AtomOraApp(rumps.App):
             on_tool_end=self._on_tool_end,
         )
 
+        # Semantic gate (local Qwen3-0.6B — lazy-loaded)
+        self.gate = SemanticGate(self.settings.get("gate", {}))
+
         # Menu items
         self.menu_status = rumps.MenuItem("Status: Idle")
         self.menu_paper = rumps.MenuItem("No paper loaded")
@@ -87,6 +91,8 @@ class AtomOraApp(rumps.App):
         other_model = "Gemini" if primary == "claude" else "Claude"
         self.menu_switch = rumps.MenuItem(f"Switch to {other_model}", callback=self.on_switch_model)
         self.menu_chat = rumps.MenuItem("Show Chat ✦", callback=self.on_toggle_chat)
+        gate_label = "🧠 Gate: On" if self.gate.enabled else "🧠 Gate: Off"
+        self.menu_gate = rumps.MenuItem(gate_label, callback=self.on_toggle_gate)
 
         # Audio device menus
         self.menu_mic_devices = rumps.MenuItem("Microphone")
@@ -99,6 +105,7 @@ class AtomOraApp(rumps.App):
             None,
             self.menu_load,
             self.menu_mute,
+            self.menu_gate,
             self.menu_chat,
             None,
             self.menu_model,
@@ -111,6 +118,14 @@ class AtomOraApp(rumps.App):
         # Auto-open chat panel
         self.chat_panel.show()
         self.chat_panel.append_message("system", "AtomOra ready. Load a paper to begin.")
+
+        # Auto PDF detection timer
+        auto_pdf_interval = self.settings.get("app", {}).get("auto_pdf_interval", 8)
+        if auto_pdf_interval > 0:
+            self._auto_pdf_timer = rumps.Timer(
+                self._check_frontmost_pdf, auto_pdf_interval
+            )
+            self._auto_pdf_timer.start()
 
     def _on_interrupt(self):
         """Handle interrupt: stop TTS and resume listening."""
@@ -172,6 +187,35 @@ class AtomOraApp(rumps.App):
                 self._start_listening()
             else:
                 self._notify("No paper loaded", "Load a paper first.")
+
+    def on_toggle_gate(self, _=None):
+        """Toggle the semantic gate on/off."""
+        self.gate.set_enabled(not self.gate.enabled)
+        self.menu_gate.title = "🧠 Gate: On" if self.gate.enabled else "🧠 Gate: Off"
+
+    def _check_frontmost_pdf(self, _=None):
+        """Auto-detect a new PDF in the frontmost window.
+
+        Called periodically by rumps.Timer. Skips if we're mid-conversation
+        or if the detected PDF is already loaded.
+        """
+        if self._processing or self.tts.is_speaking:
+            return
+
+        try:
+            pdf_path = get_frontmost_pdf_path()
+        except Exception:
+            return
+
+        if not pdf_path or not os.path.isfile(pdf_path):
+            return
+
+        # Already loaded?
+        if self.paper and self.paper.get("path") == pdf_path:
+            return
+
+        print(f"[AtomOra] Auto-detected new PDF: {pdf_path}")
+        self.on_load_paper()
 
     def on_load_paper(self, _=None):
         """Detect frontmost PDF and load its text."""
@@ -287,6 +331,11 @@ class AtomOraApp(rumps.App):
                 if transcription:
                     print(f"[AtomOra] STT: {transcription}")
                 return
+
+            # ── Semantic Gate ──
+            if self.gate.enabled and not self.gate.is_directed(transcription):
+                print(f"[AtomOra] Gate: not directed, skipping")
+                return  # finally: block handles _processing reset + mic resume
 
             self.chat_panel.append_message("user", transcription)
 

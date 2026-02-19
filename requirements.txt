@@ -16,7 +16,8 @@ sounddevice>=0.5.0          # Audio recording
 numpy>=1.26.0               # Audio processing
 silero-vad>=5.1             # Voice activity detection
 
-# --- Future: Local ML (uncomment when ready) ---
+# --- Local ML ---
+mlx-lm>=0.24.0              # Qwen3-0.6B semantic gate
 # mlx-audio                 # Qwen3-ASR STT + Kokoro/Qwen3-TTS
 # mlx-vlm                   # Qwen3-VL vision
 # sentence-transformers     # GTE embeddings
