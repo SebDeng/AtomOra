@@ -56,7 +56,7 @@ class AtomOraApp(rumps.App):
         self._processing = False
         self._interrupted = False  # Set by ⌥Space interrupt
         self._pending_images: list[dict] = []  # User-captured screenshots
-        self._silence_mode = False
+        self._silence_mode = self.settings.get("app", {}).get("silence_mode", False)
 
         # Components
         self.mic = Microphone(self.settings.get("voice", {}).get("stt", {}))
@@ -95,7 +95,8 @@ class AtomOraApp(rumps.App):
         self.menu_chat = rumps.MenuItem("Show Chat ✦", callback=self.on_toggle_chat)
         gate_label = "🧠 Gate: On" if self.gate.enabled else "🧠 Gate: Off"
         self.menu_gate = rumps.MenuItem(gate_label, callback=self.on_toggle_gate)
-        self.menu_silence = rumps.MenuItem("🔇 Silence Mode", callback=self.on_toggle_silence)
+        silence_label = "🔊 Voice Mode" if self._silence_mode else "🔇 Silence Mode"
+        self.menu_silence = rumps.MenuItem(silence_label, callback=self.on_toggle_silence)
 
         # Audio device menus
         self.menu_mic_devices = rumps.MenuItem("Microphone")
@@ -206,6 +207,8 @@ class AtomOraApp(rumps.App):
             self.menu_mute.title = "🔇 Muted"
             self._set_status("⌨️ Silence mode")
             self.title = "🔬⌨️"
+            self.settings.setdefault("app", {})["silence_mode"] = self._silence_mode
+            self._save_settings()
             print("[AtomOra] Silence mode ON")
         else:
             self.menu_silence.title = "🔇 Silence Mode"
@@ -214,6 +217,8 @@ class AtomOraApp(rumps.App):
             else:
                 self._set_status("Idle")
                 self.title = "🔬"
+            self.settings.setdefault("app", {})["silence_mode"] = self._silence_mode
+            self._save_settings()
             print("[AtomOra] Silence mode OFF")
 
     def _check_frontmost_pdf(self, _=None):
@@ -301,7 +306,10 @@ class AtomOraApp(rumps.App):
             print(f"[AtomOra] Pre-read error: {e}")
 
         self._interrupted = False
-        self._start_listening()
+        if not self._silence_mode:
+            self._start_listening()
+        else:
+            self._set_status("⌨️ Silence mode")
 
     # ─── Text Input ─────────────────────────────────────────────────
 
