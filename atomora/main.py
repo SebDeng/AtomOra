@@ -56,6 +56,7 @@ class AtomOraApp(rumps.App):
         self._processing = False
         self._interrupted = False  # Set by ⌥Space interrupt
         self._pending_images: list[dict] = []  # User-captured screenshots
+        self._silence_mode = False
 
         # Components
         self.mic = Microphone(self.settings.get("voice", {}).get("stt", {}))
@@ -67,6 +68,7 @@ class AtomOraApp(rumps.App):
         self.chat_panel = ChatPanel(
             on_interrupt=self._on_interrupt,
             on_screenshot=self._on_screenshot_requested,
+            on_text_input=self._on_text_input,
         )
 
         # Agent (tool-use loop wrapping LLM)
@@ -93,6 +95,7 @@ class AtomOraApp(rumps.App):
         self.menu_chat = rumps.MenuItem("Show Chat ✦", callback=self.on_toggle_chat)
         gate_label = "🧠 Gate: On" if self.gate.enabled else "🧠 Gate: Off"
         self.menu_gate = rumps.MenuItem(gate_label, callback=self.on_toggle_gate)
+        self.menu_silence = rumps.MenuItem("🔇 Silence Mode", callback=self.on_toggle_silence)
 
         # Audio device menus
         self.menu_mic_devices = rumps.MenuItem("Microphone")
@@ -106,6 +109,7 @@ class AtomOraApp(rumps.App):
             self.menu_load,
             self.menu_mute,
             self.menu_gate,
+            self.menu_silence,
             self.menu_chat,
             None,
             self.menu_model,
@@ -193,6 +197,25 @@ class AtomOraApp(rumps.App):
         self.gate.set_enabled(not self.gate.enabled)
         self.menu_gate.title = "🧠 Gate: On" if self.gate.enabled else "🧠 Gate: Off"
 
+    def on_toggle_silence(self, _=None):
+        """Toggle silence mode on/off."""
+        self._silence_mode = not self._silence_mode
+        if self._silence_mode:
+            self.menu_silence.title = "🔊 Voice Mode"
+            self.mic.stop()
+            self.menu_mute.title = "🔇 Muted"
+            self._set_status("⌨️ Silence mode")
+            self.title = "🔬⌨️"
+            print("[AtomOra] Silence mode ON")
+        else:
+            self.menu_silence.title = "🔇 Silence Mode"
+            if self.paper:
+                self._start_listening()
+            else:
+                self._set_status("Idle")
+                self.title = "🔬"
+            print("[AtomOra] Silence mode OFF")
+
     def _check_frontmost_pdf(self, _=None):
         """Auto-detect a new PDF in the frontmost window.
 
@@ -279,6 +302,41 @@ class AtomOraApp(rumps.App):
 
         self._interrupted = False
         self._start_listening()
+
+    # ─── Text Input ─────────────────────────────────────────────────
+
+    def _on_text_input(self, text: str):
+        """Handle typed text from the chat panel."""
+        if self._processing:
+            return
+        self._processing = True
+        self.chat_panel.append_message("user", text)
+        thread = threading.Thread(
+            target=self._process_text_input, args=(text,), daemon=True
+        )
+        thread.start()
+
+    def _process_text_input(self, text: str):
+        """Process typed text: route to silence or voice pipeline."""
+        self._interrupted = False
+        try:
+            if self._silence_mode:
+                self._set_status("🧠 Thinking...")
+                self._stream_and_show(text)
+            else:
+                self.mic.pause()
+                self._set_status("🧠 Thinking...")
+                self._stream_and_speak(text)
+        except Exception as e:
+            print(f"[AtomOra] Text input error: {e}")
+        finally:
+            self._processing = False
+            self._interrupted = False
+            if not self._silence_mode:
+                self.mic.resume()
+                self._set_status("🎤 Listening...")
+            else:
+                self._set_status("⌨️ Silence mode")
 
     # ─── Ambient Listening ────────────────────────────────────────────
 
@@ -421,6 +479,36 @@ class AtomOraApp(rumps.App):
         self.tts.speak_streamed_sync(sentence_stream())
 
         # Final update with whatever text we accumulated
+        if full_text:
+            if self._interrupted:
+                self.chat_panel.update_last_message(full_text + "\n\n⏸ [interrupted]")
+            else:
+                self.chat_panel.update_last_message(full_text)
+
+        return full_text
+
+    def _stream_and_show(self, user_message: str) -> str:
+        """Stream agent response as text only — no TTS. For silence mode."""
+        full_text = ""
+        images = self._pending_images if self._pending_images else None
+        self._pending_images = []
+
+        self.chat_panel.append_message("assistant", "...")
+
+        try:
+            for chunk in self.agent.stream(
+                user_message,
+                images=images,
+                interrupt_check=lambda: self._interrupted,
+            ):
+                if self._interrupted:
+                    break
+                full_text += chunk
+                self.chat_panel.update_last_message(full_text)
+
+        except Exception as e:
+            print(f"[AtomOra] Stream error: {e}")
+
         if full_text:
             if self._interrupted:
                 self.chat_panel.update_last_message(full_text + "\n\n⏸ [interrupted]")
