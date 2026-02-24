@@ -22,11 +22,13 @@ class ChatPanel:
         self,
         on_interrupt: Callable | None = None,
         on_screenshot: Callable | None = None,
+        on_text_input: Callable[[str], None] | None = None,
     ):
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._on_interrupt = on_interrupt
         self._on_screenshot = on_screenshot
+        self._on_text_input = on_text_input
 
     def _ensure_running(self):
         """Launch the Swift panel if not already running."""
@@ -62,16 +64,26 @@ class ChatPanel:
                 if not line:
                     continue
                 event = json.loads(line)
-                if event.get("event") == "interrupt":
-                    print("[ChatPanel] ⌥Space interrupt from Swift panel")
-                    if self._on_interrupt:
-                        self._on_interrupt()
-                elif event.get("event") == "screenshot":
-                    print("[ChatPanel] ⌥S screenshot from Swift panel")
-                    if self._on_screenshot:
-                        self._on_screenshot()
+                self._dispatch_event(event)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
+
+    def _dispatch_event(self, event: dict):
+        """Dispatch a parsed JSON event from the Swift panel."""
+        event_type = event.get("event")
+        if event_type == "interrupt":
+            print("[ChatPanel] ⌥Space interrupt from Swift panel")
+            if self._on_interrupt:
+                self._on_interrupt()
+        elif event_type == "screenshot":
+            print("[ChatPanel] ⌥S screenshot from Swift panel")
+            if self._on_screenshot:
+                self._on_screenshot()
+        elif event_type == "text_input":
+            text = event.get("text", "").strip()
+            if text and self._on_text_input:
+                print(f"[ChatPanel] Text input: {text[:50]}...")
+                self._on_text_input(text)
 
     def _send(self, action: dict):
         """Send a JSON action to the Swift panel."""
