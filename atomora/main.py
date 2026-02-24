@@ -297,7 +297,10 @@ class AtomOraApp(rumps.App):
                 "I just opened this paper. Skim through it and give me 2-3 sentences "
                 "on the core findings and anything worth noting. Be concise."
             )
-            self._stream_and_speak(prompt)
+            if self._silence_mode:
+                self._stream_and_show(prompt)
+            else:
+                self._stream_and_speak(prompt)
 
             if self._interrupted:
                 print("[AtomOra] Pre-read interrupted, skipping to listening")
