@@ -3,9 +3,11 @@ Paper deduplication and AI-based filtering for daily briefing.
 
 This module provides:
 1. Deduplication across multiple sources (arXiv, S2, OpenAlex)
-2. LLM-based relevance scoring and summarization using Claude Sonnet 4.5
+2. Cross-day seen paper cache (avoid re-recommending papers)
+3. LLM-based relevance scoring and summarization using Claude Sonnet 4.5
 """
 
+import os
 import re
 import unicodedata
 import json
@@ -17,6 +19,55 @@ import anthropic
 from atomora.briefing.sources.base import Paper
 
 logger = logging.getLogger(__name__)
+
+
+# ─── Cross-day seen paper cache ─────────────────────────────────────
+
+def _paper_cache_key(paper: Paper) -> str:
+    """Generate a stable cache key for a paper. Priority: DOI > arXiv ID > title."""
+    if paper.doi:
+        return f"doi:{paper.doi}"
+    if paper.arxiv_id:
+        return f"arxiv:{paper.arxiv_id}"
+    # Normalize title: lowercase, strip punctuation, collapse whitespace
+    t = paper.title.lower().strip()
+    t = re.sub(r'[^\w\s]', '', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return f"title:{t}"
+
+
+def load_seen_cache(path: str) -> dict[str, str]:
+    """Load seen papers cache. Returns {cache_key: date_string}."""
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to load seen cache: {e}")
+        return {}
+
+
+def save_seen_cache(path: str, cache: dict[str, str]) -> None:
+    """Save seen papers cache to disk."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(cache, f, indent=2, ensure_ascii=False)
+
+
+def remove_seen_papers(papers: list[Paper], cache: dict[str, str]) -> list[Paper]:
+    """Remove papers that are already in the seen cache."""
+    if not cache:
+        return papers
+    result = []
+    for p in papers:
+        key = _paper_cache_key(p)
+        if key not in cache:
+            result.append(p)
+    removed = len(papers) - len(result)
+    if removed:
+        logger.info(f"Removed {removed} previously seen papers")
+    return result
 
 
 def _normalize_title(title: str) -> str:
@@ -158,16 +209,21 @@ def filter_and_summarize(
     system_prompt = f"""You are a research paper filter for a physicist. Evaluate each paper's relevance.
 
 Research focus:
-- hexagonal boron nitride (hBN), single photon emitters (SPE)
-- cathodoluminescence, STEM, quantum emitters
-- 2D materials, photonics, nanophotonics
+- hexagonal boron nitride (hBN) single photon emitters (SPE), color centers, quantum emitters in 2D materials
+- phonon polaritons, nano-optics, nanophotonics, photonic crystal cavities
+- transition metal dichalcogenides (TMDs) such as MoS2, WS2, WSe2 — especially chemical vapor deposition (CVD) growth
+- cathodoluminescence (CL), aberration-corrected scanning transmission electron microscopy (AC-STEM), electron energy loss spectroscopy (EELS)
+- photoluminescence (PL) spectroscopy, Raman spectroscopy of 2D materials
+- 2D materials, van der Waals heterostructures, photonics
 {research_profile}
 
-Scoring:
-  0.9-1.0: Directly about hBN/SPE/CL — must read
-  0.7-0.9: Related 2D photonics, quantum emitters, STEM techniques
-  0.5-0.7: Adjacent materials science, useful methodology
+Scoring (consider BOTH topic relevance AND journal prestige):
+  0.9-1.0: Directly about hBN SPE/quantum emitters, phonon polaritons in hBN/2D, or TMD CVD growth — must read
+  0.7-0.9: Related nano-optics, STEM/EELS characterization, PL/Raman of 2D materials, quantum photonics
+  0.5-0.7: Adjacent materials science, useful methodology or instrumentation
   <0.5: Not relevant
+
+Journal prestige bonus: bump score by +0.05~0.1 for top-tier journals (Nature, Science, Nature Photonics, Nature Materials, PRL, Nano Letters, etc.). A marginally relevant paper in Nature is worth flagging; the same paper in a low-impact journal may not be.
 
 For papers scoring ≥{threshold}, write a one-line summary (1 sentence, conversational, like a colleague saying "this one's about..."). Bilingual OK if the paper is Chinese.
 

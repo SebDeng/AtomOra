@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 import time
+from datetime import date, timedelta
 
 import yaml
 
@@ -18,13 +19,18 @@ from atomora.briefing.sources.base import Paper
 from atomora.briefing.sources.arxiv_source import ArxivSource
 from atomora.briefing.sources.openalex_source import OpenAlexSource
 from atomora.briefing.sources.s2_source import SemanticScholarSource
-from atomora.briefing.filter import deduplicate, filter_and_summarize
+from atomora.briefing.filter import (
+    deduplicate, filter_and_summarize,
+    load_seen_cache, save_seen_cache, remove_seen_papers, _paper_cache_key,
+)
 from atomora.briefing.delivery.local import save_local_briefing
 from atomora.briefing.delivery.slack import send_slack_briefing
 
 logger = logging.getLogger(__name__)
 
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "config")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "briefing")
+SEEN_CACHE_PATH = os.path.join(DATA_DIR, "seen_papers.json")
 
 
 def load_yaml(filename: str) -> dict:
@@ -160,11 +166,23 @@ def run(days: int = 1, dry_run: bool = False) -> None:
 
     print(f"\n  Total fetched: {total_fetched}")
 
-    # 3. Deduplicate
+    # 3. Deduplicate (within this batch)
     print("\n🔄 Deduplicating...")
     unique_papers = deduplicate(all_papers)
     after_dedup = len(unique_papers)
     print(f"  {total_fetched} → {after_dedup} unique papers")
+
+    # 3b. Remove previously seen papers (cross-day dedup)
+    seen_cache = load_seen_cache(SEEN_CACHE_PATH)
+    if seen_cache:
+        new_papers = remove_seen_papers(unique_papers, seen_cache)
+        print(f"  → {len(new_papers)} new (removed {after_dedup - len(new_papers)} previously seen)")
+        unique_papers = new_papers
+        after_dedup = len(unique_papers)
+
+    if after_dedup == 0:
+        print("\n  No new papers today.")
+        return
 
     # 4. Filter with LLM (Sonnet 4.5)
     print(f"\n🧠 Filtering with Sonnet 4.5 ({after_dedup} papers)...")
@@ -195,7 +213,7 @@ def run(days: int = 1, dry_run: bool = False) -> None:
     slack_url = secrets.get("slack", {}).get("webhook_url", "")
     if slack_url:
         print("\n📨 Sending to Slack...")
-        ok = send_slack_briefing(slack_url, filtered, delivery_stats)
+        ok = send_slack_briefing(slack_url, filtered, delivery_stats, local_path=filepath)
         if ok:
             print("  ✓ Slack delivered")
         else:
@@ -203,7 +221,18 @@ def run(days: int = 1, dry_run: bool = False) -> None:
     else:
         print("\n  (Slack not configured — skipping)")
 
-    # 8. Summary
+    # 8. Update seen cache (record all delivered papers)
+    today = date.today().isoformat()
+    for item in filtered:
+        key = _paper_cache_key(item["paper"])
+        seen_cache[key] = today
+    # Prune entries older than 60 days
+    cutoff = (date.today() - timedelta(days=60)).isoformat()
+    seen_cache = {k: v for k, v in seen_cache.items() if v >= cutoff}
+    save_seen_cache(SEEN_CACHE_PATH, seen_cache)
+    print(f"  📋 Seen cache updated ({len(seen_cache)} entries)")
+
+    # 9. Summary
     high = sum(1 for p in filtered if p["score"] >= 0.8)
     print(f"\n✅ Done! {len(filtered)} papers ({high} high-relevance)")
 
