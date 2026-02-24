@@ -28,6 +28,8 @@ Phase 1 (Talking Sidebar), Phase 2 (Ambient Context), Phase 3.1 (Agentic Vision)
 8. **Audio device selection** — choose microphone and speaker from menubar
 9. **Semantic gate** — local Qwen3-0.6B classifies if speech is directed at AtomOra (toggleable)
 10. Floating chat panel shows conversation + tool execution in real-time
+11. **Text input** — type in the chat panel (Enter to send), works in both voice and silence modes
+12. **Silence mode** — menubar toggle, mutes mic + TTS, text-only I/O for office environments
 
 **Daily paper briefing** (`python -m atomora.briefing.run_briefing`):
 1. Fetches papers from **arXiv**, **OpenAlex**, **Semantic Scholar** (parallel, fault-tolerant)
@@ -76,7 +78,9 @@ Phase 1 (Talking Sidebar), Phase 2 (Ambient Context), Phase 3.1 (Agentic Vision)
 │  ├── chat_panel.py      — Python ↔ Swift bridge      │
 │  └── AtomOraPanel.swift — Native floating panel +    │
 │                           ⌥Space interrupt +         │
-│                           ⌥S screenshot hotkey       │
+│                           ⌥S screenshot hotkey +     │
+│                           InputBar text input +      │
+│                           KeyablePanel for focus     │
 │                                                      │
 │  Briefing                                            │
 │  ├── sources/            — Paper fetchers             │
@@ -116,6 +120,18 @@ Mic (always on)
                 → Chat panel (real-time text via Swift stdin)
 ```
 
+### Text Input Pipeline (Silence Mode)
+
+```
+Chat panel TextField (Enter to send)
+  → Swift stdout: {"event":"text_input","text":"..."}
+    → Python _dispatch_event → _on_text_input callback
+      → _process_text_input (daemon thread)
+        ├── silence mode → _stream_and_show (text only, no TTS)
+        │     → Agent Loop → text chunks → chat panel live update
+        └── voice mode → _stream_and_speak (with TTS, same as voice)
+```
+
 Key design decisions:
 - **Semantic gate**: local Qwen3-0.6B classifies directed vs ambient speech — fail-open on error
 - **Auto PDF detection**: `rumps.Timer` polls frontmost window, auto-loads new papers
@@ -128,6 +144,9 @@ Key design decisions:
 - **Interrupt via ⌥Space** — Carbon RegisterEventHotKey (no Accessibility permission needed)
 - **Screenshot via ⌥S** — user-initiated capture, attached to next voice message
 - **Audio device selection** — stored by name (not index), resolved at runtime
+- **Silence mode** — menubar toggle, disables mic + TTS, text field always available
+- **Text input** — SwiftUI TextField sends JSON to Python via stdout, bypasses STT/gate
+- **KeyablePanel** — NSPanel subclass overrides `canBecomeKey` for TextField keyboard focus
 
 ### Interrupt Flow (⌥Space)
 
@@ -259,10 +278,24 @@ atomora/
 
 ### Chat Panel (AtomOraPanel.swift)
 - Native SwiftUI NSPanel with `.ultraThinMaterial` dark glass effect
+- `KeyablePanel` subclass overrides `canBecomeKey` for TextField keyboard focus
 - Floating, always-on-top, joins all spaces
-- Python→Swift: JSON lines on stdin (append, update_last, clear, show, hide)
-- Swift→Python: JSON lines on stdout (interrupt events)
+- `InputBar` — TextField + send button at bottom, Enter to submit
+- Python→Swift: JSON lines on stdin (append, update_last, clear, show, hide; optional `icon` field)
+- Swift→Python: JSON lines on stdout (interrupt, screenshot, text_input events)
+- `_dispatch_event()` in chat_panel.py routes all events from Swift
 - Carbon `RegisterEventHotKey` for ⌥Space global hotkey
+- Keyboard icon (`keyboard.fill`) for typed messages, mic icon for voice
+
+### Silence Mode (main.py)
+- **Toggle**: menubar "🔇 Silence Mode" / "🔊 Voice Mode"
+- **ON**: stops mic, disables TTS, sets status "⌨️ Silence mode"
+- **OFF**: resumes mic + listening (if paper loaded)
+- **`_stream_and_show()`**: same as `_stream_and_speak()` but skips TTS — text-only to panel
+- **`_on_text_input()`**: receives typed text from ChatPanel, spawns daemon thread
+- **`_process_text_input()`**: routes to `_stream_and_show` (silence) or `_stream_and_speak` (voice)
+- **Persisted**: `settings.yaml` → `app.silence_mode`, survives restarts
+- Text field always available in both modes — mode only controls mic + TTS
 
 ### Agent Loop (agent/agent_loop.py)
 - **Agentic tool-use pattern** modeled after Claude Code
