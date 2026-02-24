@@ -14,14 +14,45 @@
 ### Daily Paper Briefing (automated)
 6. **Multi-source fetching** — Pulls recent papers from arXiv, OpenAlex, and Semantic Scholar in parallel.
 7. **Smart dedup** — Merges duplicates across sources (DOI → arXiv ID → title), prefers journal versions over preprints while keeping arXiv PDF links.
-8. **AI filtering** — Sonnet 4.5 batch-scores all papers against your research profile and writes one-line summaries (~$0.10-0.25/day).
-9. **Delivery** — Slack (Block Kit), local Markdown file, and macOS notification.
+8. **AI filtering** — Sonnet 4.5 batch-scores all papers against your research profile (topic relevance + journal prestige) and writes one-line summaries (~$0.10-0.25/day).
+9. **Delivery** — Slack (Block Kit) with local file path, Markdown archive, and macOS notification (click to open Slack).
+10. **Scheduled** — Runs daily at 8:00 AM via `launchd`, including weekends.
+
+#### Manual run
 
 ```bash
-python -m atomora.briefing.run_briefing           # full run
+python -m atomora.briefing.run_briefing           # full run (1 day)
 python -m atomora.briefing.run_briefing --days 3   # look back 3 days
 python -m atomora.briefing.run_briefing --dry-run  # console preview only
+python -m atomora.briefing.run_briefing -v         # verbose logging
 ```
+
+#### Scheduled briefing (launchd)
+
+The briefing runs automatically every day at 8:00 AM via macOS `launchd`. The plist is at `~/Library/LaunchAgents/com.atomora.briefing.plist`.
+
+```bash
+# Check status
+launchctl list | grep atomora
+
+# Manually trigger a run
+launchctl start com.atomora.briefing
+
+# View logs
+tail -f data/briefing/launchd.log
+
+# Stop the daily schedule
+launchctl unload ~/Library/LaunchAgents/com.atomora.briefing.plist
+
+# Restart the daily schedule
+launchctl load ~/Library/LaunchAgents/com.atomora.briefing.plist
+
+# Reload after editing the plist
+launchctl unload ~/Library/LaunchAgents/com.atomora.briefing.plist && \
+launchctl load ~/Library/LaunchAgents/com.atomora.briefing.plist
+```
+
+Briefing results are saved to `data/briefing/YYYY-MM-DD.md`.
 
 AtomOra is not an assistant. It's a research colleague — it has opinions, asks probing questions, and tells you what you need to hear.
 
@@ -170,7 +201,7 @@ All settings in [`atomora/config/settings.yaml`](atomora/config/settings.yaml):
 | `voice.stt.min_speech_duration` | `0.8` | Minimum speech to process (skip noise) |
 | `pdf.max_pages` | `50` | Skip PDFs longer than this |
 | `briefing.relevance_threshold` | `0.6` | Minimum score for paper inclusion |
-| `briefing.max_papers` | `10` | Max papers per briefing |
+| `briefing.max_papers` | `20` | Max papers per briefing |
 | `briefing.arxiv_categories` | `[cond-mat.mtrl-sci, ...]` | arXiv categories to monitor |
 | `briefing.s2_queries` | `["hexagonal boron nitride", ...]` | Semantic Scholar search terms |
 

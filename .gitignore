@@ -28,6 +28,9 @@ atomora/config/secrets.yaml
 # Data
 data/
 
+# Test PDFs (large binary files)
+TestPDF/
+
 # IDE
 .idea/
 .vscode/

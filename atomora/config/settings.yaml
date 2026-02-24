@@ -1,11 +1,6 @@
 agent:
   max_tool_rounds: 5
   screenshot_max_width: 1920
-gate:
-  enabled: true
-  model: mlx-community/Qwen3-0.6B-4bit
-  max_tokens: 3
-  temperature: 0.0
 app:
   auto_pdf_interval: 8
   hotkey_load_paper: cmd+shift+a
@@ -17,6 +12,65 @@ app:
     glancing at a paper for the first time.
 
     '
+  silence_mode: true
+briefing:
+  arxiv_categories:
+  - cond-mat.mtrl-sci
+  - cond-mat.mes-hall
+  - physics.optics
+  - physics.app-ph
+  - quant-ph
+  journals:
+  - Nature
+  - Science
+  - Nature Photonics
+  - Nature Physics
+  - Nature Materials
+  - Nature Nanotechnology
+  - Nature Communications
+  - Physical Review Letters
+  - Physical Review B
+  - Physical Review X
+  - Nano Letters
+  - ACS Nano
+  - ACS Photonics
+  - Advanced Materials
+  - Advanced Functional Materials
+  - Optica
+  - 2D Materials
+  - npj 2D Materials and Applications
+  - 'Light: Science & Applications'
+  - Ultramicroscopy
+  - Microscopy and Microanalysis
+  max_papers: 20
+  openalex_concepts:
+  - photonics
+  - materials science
+  - nanotechnology
+  - optics
+  - phonon polariton
+  - transition metal dichalcogenide
+  - Raman spectroscopy
+  - electron microscopy
+  relevance_threshold: 0.6
+  s2_queries:
+  - hexagonal boron nitride (hBN)
+  - single photon emitter
+  - hBN color center
+  - phonon polariton
+  - 2D materials
+  - transition metal dichalcogenide (TMD)
+  - CVD growth
+  - chemical vapor deposition
+  - cathodoluminescence
+  - aberration-corrected STEM
+  - photoluminescence Raman
+  - quantum emitter nanophotonics
+gate:
+  enabled: true
+  max_tokens: 3
+  model: mlx-community/Qwen3-0.6B-4bit
+  temperature: 0.0
 llm:
   claude:
     max_output_tokens: 4096
@@ -27,73 +81,18 @@ llm:
     model: gemini-2.5-pro
     temperature: 0.7
   primary: claude
-briefing:
-  arxiv_categories:
-    - cond-mat.mtrl-sci
-    - cond-mat.mes-hall
-    - physics.optics
-    - physics.app-ph
-    - quant-ph
-  openalex_concepts:
-    - photonics
-    - materials science
-    - nanotechnology
-    - optics
-    - phonon polariton
-    - transition metal dichalcogenide
-    - Raman spectroscopy
-    - electron microscopy
-  s2_queries:
-    - hexagonal boron nitride (hBN)
-    - single photon emitter
-    - hBN color center
-    - phonon polariton 
-    - 2D materials
-    - transition metal dichalcogenide (TMD) 
-    - CVD growth
-    - chemical vapor deposition
-    - cathodoluminescence 
-    - aberration-corrected STEM 
-    - photoluminescence Raman 
-    - quantum emitter nanophotonics
-  journals:
-    - Nature
-    - Science
-    - Nature Photonics
-    - Nature Physics
-    - Nature Materials
-    - Nature Nanotechnology
-    - Nature Communications
-    - Physical Review Letters
-    - Physical Review B
-    - Physical Review X
-    - Nano Letters
-    - ACS Nano
-    - ACS Photonics
-    - Advanced Materials
-    - Advanced Functional Materials
-    - Optica
-    - 2D Materials
-    - npj 2D Materials and Applications
-    - 'Light: Science & Applications'
-    - Ultramicroscopy
-    - Microscopy and Microanalysis
-  relevance_threshold: 0.6
-  max_papers: 20
 pdf:
   max_chars: 100000
   max_pages: 50
 voice:
   stt:
-    device_name: !!python/object/apply:builtins.str
-    - 'Sebastian的AirPods #3'
+    device_name: 'Sebastian的AirPods #3'
     model: Qwen/Qwen3-ASR-0.6B
     sample_rate: 16000
     silence_duration: 1.0
     vad_threshold: 0.5
   tts:
-    device_name: !!python/object/apply:builtins.str
-    - 'Sebastian的AirPods #3'
+    device_name: 'Sebastian的AirPods #3'
     edge:
       rate: +0%
       voice: en-US-AvaMultilingualNeural

@@ -120,18 +120,49 @@ def save_local_briefing(papers: list[dict], stats: dict | None = None) -> str:
     filepath.write_text(content, encoding="utf-8")
     print(f"✓ Saved briefing to {filepath}")
 
-    # macOS notification
+    # macOS notification + open Slack and rendered Markdown
     high_count = len(high_relevance)
     notif_text = f"{len(papers)} papers today"
     if high_count > 0:
         notif_text += f" — {high_count} high relevance"
 
+    _send_notification(notif_text, str(filepath))
+
+    return str(filepath)
+
+
+def _send_notification(message: str, md_path: str) -> None:
+    """Send macOS notification. Click opens Slack + rendered Markdown.
+
+    Uses terminal-notifier (supports click actions) with fallback to osascript.
+    """
+    import shutil
+
+    tn = shutil.which("terminal-notifier")
+    if tn:
+        # terminal-notifier: -execute runs a shell command on click
+        # Open both Slack and the Markdown file (rendered by default viewer)
+        click_cmd = 'open -a Slack'
+        try:
+            subprocess.run([
+                tn,
+                "-title", "AtomOra 🔬",
+                "-subtitle", "Daily Paper Briefing",
+                "-message", message,
+                "-execute", click_cmd,
+                "-sound", "default",
+                "-group", "atomora-briefing",
+            ], check=False, timeout=10)
+        except Exception as e:
+            print(f"⚠ terminal-notifier failed: {e}")
+        return
+
+    # Fallback: osascript (no click action, but still shows notification)
     try:
         subprocess.run([
             "osascript", "-e",
-            f'display notification "{notif_text}" with title "AtomOra 🔬" subtitle "Daily Paper Briefing"'
+            f'display notification "{message}" with title "AtomOra 🔬" subtitle "Daily Paper Briefing"'
         ], check=False, timeout=5)
+        subprocess.run(["open", "-a", "Slack"], check=False, timeout=5)
     except Exception as e:
         print(f"⚠ Notification failed: {e}")
-
-    return str(filepath)
