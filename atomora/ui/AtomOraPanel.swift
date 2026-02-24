@@ -70,6 +70,7 @@ struct ChatAction: Codable {
 
 class ChatState: ObservableObject {
     @Published var messages: [ChatMessage] = []
+    @Published var inputText: String = ""
 
     func append(role: String, text: String) {
         DispatchQueue.main.async {
@@ -168,6 +169,51 @@ struct TitleBar: View {
     }
 }
 
+struct InputBar: View {
+    @ObservedObject var state: ChatState
+    var onSubmit: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField("Type a message...", text: $state.inputText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(.white.opacity(0.9))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(.white.opacity(0.08))
+                )
+                .onSubmit {
+                    let text = state.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { return }
+                    onSubmit(text)
+                    state.inputText = ""
+                }
+
+            Button(action: {
+                let text = state.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return }
+                onSubmit(text)
+                state.inputText = ""
+            }) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 22))
+                    .foregroundColor(
+                        state.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? .white.opacity(0.2)
+                            : Color(red: 0.35, green: 0.78, blue: 1.0)
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(state.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+}
+
 struct ChatContentView: View {
     @ObservedObject var state: ChatState
 
@@ -204,11 +250,31 @@ struct ChatContentView: View {
                     }
                 }
             }
+
+            Divider()
+                .background(Color.white.opacity(0.1))
+
+            InputBar(state: state) { text in
+                let escaped = text
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                    .replacingOccurrences(of: "\n", with: "\\n")
+                let msg = "{\"event\":\"text_input\",\"text\":\"\(escaped)\"}\n"
+                if let data = msg.data(using: .utf8) {
+                    FileHandle.standardOutput.write(data)
+                }
+            }
         }
         .frame(minWidth: 320, idealWidth: 440, minHeight: 300, idealHeight: 580)
         .background(.ultraThinMaterial)
         .preferredColorScheme(.dark)
     }
+}
+
+// MARK: - Keyable Panel
+
+class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
 }
 
 // MARK: - App Delegate
@@ -284,7 +350,7 @@ class PanelDelegate: NSObject, NSApplicationDelegate {
         let w: CGFloat = 420
         let h: CGFloat = 560
 
-        panel = NSPanel(
+        panel = KeyablePanel(
             contentRect: NSRect(x: 0, y: 0, width: w, height: h),
             styleMask: [
                 .titled,
