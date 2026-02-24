@@ -318,7 +318,7 @@ class AtomOraApp(rumps.App):
         if self._processing:
             return
         self._processing = True
-        self.chat_panel.append_message("user", text)
+        self.chat_panel.append_message("user", text, icon="keyboard")
         thread = threading.Thread(
             target=self._process_text_input, args=(text,), daemon=True
         )

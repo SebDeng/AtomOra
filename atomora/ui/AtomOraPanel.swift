@@ -52,11 +52,13 @@ struct ChatMessage: Identifiable {
     let id: UUID
     let role: String
     var text: String
+    var iconOverride: String?
 
-    init(role: String, text: String) {
+    init(role: String, text: String, iconOverride: String? = nil) {
         self.id = UUID()
         self.role = role
         self.text = text
+        self.iconOverride = iconOverride
     }
 }
 
@@ -64,6 +66,7 @@ struct ChatAction: Codable {
     let action: String
     let role: String?
     let text: String?
+    let icon: String?
 }
 
 // MARK: - State
@@ -72,9 +75,9 @@ class ChatState: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var inputText: String = ""
 
-    func append(role: String, text: String) {
+    func append(role: String, text: String, icon: String? = nil) {
         DispatchQueue.main.async {
-            self.messages.append(ChatMessage(role: role, text: text))
+            self.messages.append(ChatMessage(role: role, text: text, iconOverride: icon))
         }
     }
 
@@ -106,6 +109,12 @@ struct MessageBubble: View {
     }
 
     private var roleIcon: String {
+        if let override = message.iconOverride {
+            switch override {
+            case "keyboard": return "keyboard.fill"
+            default: break
+            }
+        }
         switch message.role {
         case "user":      return "mic.fill"
         case "assistant": return "atom"
@@ -408,7 +417,7 @@ class PanelDelegate: NSObject, NSApplicationDelegate {
                 switch action.action {
                 case "append":
                     if let role = action.role, let text = action.text {
-                        self?.chatState.append(role: role, text: text)
+                        self?.chatState.append(role: role, text: text, icon: action.icon)
                     }
                 case "update_last":
                     if let text = action.text {

@@ -108,14 +108,18 @@ class ChatPanel:
         """Toggle the panel visibility."""
         self._send({"action": "show"})
 
-    def append_message(self, role: str, text: str):
+    def append_message(self, role: str, text: str, icon: str | None = None):
         """Add a message to the chat panel.
 
         Args:
             role: 'user', 'assistant', or 'system'
             text: The message text
+            icon: Optional icon override (e.g. 'keyboard' for typed messages)
         """
-        self._send({"action": "append", "role": role, "text": text})
+        msg = {"action": "append", "role": role, "text": text}
+        if icon:
+            msg["icon"] = icon
+        self._send(msg)
 
     def update_last_message(self, text: str):
         """Update the text of the last message (for streaming display)."""
